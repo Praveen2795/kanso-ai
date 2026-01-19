@@ -1,0 +1,5 @@
+{
+  "name": "Kanso.AI",
+  "description": "An agentic AI project planner that creates clear, realistic Gantt charts with built-in buffers and collaborative refinement.",
+  "requestFramePermissions": []
+}

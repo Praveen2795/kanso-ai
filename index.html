@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="https://vitejs.dev/logo.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kanso.AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              background: '#0f172a', // Slate 900
+              surface: '#1e293b', // Slate 800
+              primary: '#6366f1', // Indigo 500
+              secondary: '#10b981', // Emerald 500
+              accent: '#f43f5e', // Rose 500
+            },
+            animation: {
+              'pulse-fast': 'pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+              'gradient-flow': 'gradient-flow 3s ease infinite',
+            },
+            keyframes: {
+              'gradient-flow': {
+                '0%, 100%': {
+                  'background-size': '200% 200%',
+                  'background-position': 'left center'
+                },
+                '50%': {
+                  'background-size': '200% 200%',
+                  'background-position': 'right center'
+                },
+              },
+            }
+          },
+        },
+      }
+    </script>
+    <style>
+      /* Custom Scrollbar for Gantt */
+      .gantt-scroll::-webkit-scrollbar {
+        height: 8px;
+        width: 8px;
+      }
+      .gantt-scroll::-webkit-scrollbar-track {
+        background: #1e293b;
+      }
+      .gantt-scroll::-webkit-scrollbar-thumb {
+        background: #475569;
+        border-radius: 4px;
+      }
+      .gantt-scroll::-webkit-scrollbar-thumb:hover {
+        background: #64748b;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "@google/genai": "https://esm.sh/@google/genai@^1.37.0",
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3"
+  }
+}
+</script>
+</head>
+  <body class="bg-background text-slate-100 font-sans antialiased overflow-hidden">
+    <div id="root"></div>
+  </body>
+</html>
