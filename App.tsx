@@ -1,9 +1,27 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { AppState, AgentStatus, AgentType, ProjectData, ChatMessage, Task, ViewMode } from './types';
+import { AppState, AgentStatus, AgentType, ProjectData, ChatMessage, Task, ViewMode, UploadedFile } from './types';
 import AgentStatusDisplay from './components/AgentStatusDisplay';
 import GanttChart from './components/GanttChart';
 import ProjectDetails from './components/ProjectDetails';
-import { analyzeRequest, createProjectStructure, estimateProjectTimelines, reviewAndRefinePlan, chatWithProjectManager, recalculateSchedule } from './services/geminiService';
+import ImpactBackground from './components/ImpactBackground';
+import { 
+  analyzeRequest, 
+  createProjectStructure, 
+  validateStructure, 
+  estimateProjectTimelines, 
+  validateEstimates, 
+  reviewAndRefinePlan, 
+  chatWithProjectManager, 
+  recalculateSchedule,
+  checkFileRelevance
+} from './services/geminiService';
+
+const SUGGESTED_PROMPTS = [
+  { emoji: '🚀', title: 'Startup Launch', text: 'Launch a Shopify store in 30 days' },
+  { emoji: '✈️', title: 'Travel Logistics', text: 'Plan a 2-week itinerary for Japan' },
+  { emoji: '🎓', title: 'Study Plan', text: '3-month study schedule for AWS certification' },
+  { emoji: '🏠', title: 'Renovation', text: 'Kitchen remodel project management' }
+];
 
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>('IDLE');
@@ -13,14 +31,31 @@ const App: React.FC = () => {
   const [clarifyingQuestions, setClarifyingQuestions] = useState<string[]>([]);
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({});
   
+  // File Upload State
+  const [uploadedFile, setUploadedFile] = useState<UploadedFile | null>(null);
+
   const [agentStatus, setAgentStatus] = useState<AgentStatus>({ active: false, name: AgentType.ANALYST, message: '' });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
+  const [isChatOpen, setIsChatOpen] = useState(true);
+  const [isRefining, setIsRefining] = useState(false);
+  const [showDetailsPulse, setShowDetailsPulse] = useState(false);
+  
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Initialize chat visibility based on screen width
+  useEffect(() => {
+    if (window.innerWidth < 768) {
+      setIsChatOpen(false);
+    }
+  }, []);
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    if (isChatOpen) {
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, isChatOpen]);
 
   const runAgent = async (name: AgentType, message: string, action: () => Promise<any>) => {
     setAgentStatus({ active: true, name, message });
@@ -34,15 +69,39 @@ const App: React.FC = () => {
     }
   };
 
-  const handleStart = async () => {
-    if (!inputValue.trim()) return;
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64String = reader.result as string;
+        // Strip the data:url prefix to get raw base64 for Gemini
+        const base64Content = base64String.split(',')[1];
+        setUploadedFile({
+          name: file.name,
+          type: file.type,
+          data: base64Content
+        });
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleStart = async (overrideInput?: string) => {
+    const finalInput = overrideInput || inputValue;
+    if (!finalInput.trim()) return;
+    
+    // If triggered via suggestion, update state to reflect selection
+    if (overrideInput) setInputValue(overrideInput);
+
     setAppState('CLARIFYING');
+    setUploadedFile(null); // Reset file on new start
 
     try {
       const analysis = await runAgent(
         AgentType.ANALYST, 
         "Analyzing project scope, verifying terms, and identifying gaps...",
-        () => analyzeRequest(inputValue)
+        () => analyzeRequest(finalInput)
       );
 
       if (analysis.needsClarification) {
@@ -51,7 +110,7 @@ const App: React.FC = () => {
         return;
       }
 
-      await generatePlan(inputValue, "Context implied from prompt.");
+      await generatePlan(finalInput, "Context implied from prompt.");
     } catch (e) {
       alert("Something went wrong with the AI. Please try again.");
       setAppState('IDLE');
@@ -68,24 +127,74 @@ const App: React.FC = () => {
   const generatePlan = async (topic: string, context: string) => {
     setAppState('GENERATING');
     try {
-      // 1. ARCHITECT: Structure only
-      const structuralPlan = await runAgent(
+      let fileToUse = uploadedFile;
+      let augmentedContext = context;
+
+      // 0. CHECK FILE RELEVANCE (If file exists)
+      if (uploadedFile) {
+        const relevanceCheck = await runAgent(
+          AgentType.ANALYST,
+          "Analyzing file content and verifying relevance to your goal...",
+          () => checkFileRelevance(topic, uploadedFile)
+        );
+
+        if (!relevanceCheck.isRelevant) {
+          console.log(`File ${uploadedFile.name} deemed irrelevant: ${relevanceCheck.reason}`);
+          fileToUse = null;
+          augmentedContext += `\n[System Note: User uploaded file '${uploadedFile.name}' but it was determined irrelevant and ignored. Reason: ${relevanceCheck.reason}]`;
+        }
+      }
+
+      // 1. ARCHITECT (STRUCTURE)
+      let structuralPlan = await runAgent(
         AgentType.ARCHITECT,
-        "Researching real-world workflows and designing the project structure (Phases, Tasks, Subtasks)...",
-        () => createProjectStructure(topic, context)
+        fileToUse 
+          ? `Researching structure. Analyzing uploaded ${fileToUse.type} file for context...`
+          : "Researching workflows and designing the structure (Phases, Tasks)...",
+        () => createProjectStructure(topic, augmentedContext, undefined, fileToUse || undefined)
       );
 
-      // 2. ESTIMATOR: Bottom-up estimation
-      const estimatedPlan = await runAgent(
+      // 1.5. REVIEWER (STRUCTURE CHECK LOOP)
+      const structureCheck = await runAgent(
+        AgentType.REVIEWER,
+        "Validating logical dependencies and structural completeness...",
+        () => validateStructure(structuralPlan)
+      );
+
+      if (!structureCheck.isValid) {
+        structuralPlan = await runAgent(
+            AgentType.ARCHITECT,
+            `Reviewer feedback: "${structureCheck.critique}". Re-designing structure...`,
+            () => createProjectStructure(topic, augmentedContext, structureCheck.critique, fileToUse || undefined)
+        );
+      }
+
+      // 2. ESTIMATOR (TIME)
+      let estimatedPlan = await runAgent(
         AgentType.ESTIMATOR,
-        "Calculating realistic bottom-up estimates for every single subtask and adding safety buffers...",
+        "Calculating bottom-up estimates for every subtask...",
         () => estimateProjectTimelines(structuralPlan)
       );
 
-      // 3. REVIEWER: Final sanity check
+      // 2.5 REVIEWER (TIME CHECK LOOP)
+      const timeCheck = await runAgent(
+        AgentType.REVIEWER,
+        "Sanity checking time estimates and buffer allocations...",
+        () => validateEstimates(estimatedPlan)
+      );
+
+      if (!timeCheck.isValid) {
+        estimatedPlan = await runAgent(
+             AgentType.ESTIMATOR,
+             `Reviewer feedback: "${timeCheck.critique}". Recalculating estimates...`,
+             () => estimateProjectTimelines(structuralPlan, timeCheck.critique)
+        );
+      }
+
+      // 3. FINAL CLEANUP
       const refinedPlanRaw = await runAgent(
         AgentType.REVIEWER,
-        "Reviewing logic, ensuring dependencies cascade correctly, and finalizing the schedule...",
+        "Finalizing schedule and formatting output...",
         () => reviewAndRefinePlan(estimatedPlan)
       );
 
@@ -94,9 +203,9 @@ const App: React.FC = () => {
         id: t.id,
         name: t.name,
         phase: t.phase,
-        startOffset: Number(t.startOffsetHours) || 0,
-        duration: Math.max(Number(t.estimatedHours) || 1, 0.5),
-        buffer: Number(t.recommendedBufferHours) || 0,
+        startOffset: Number(t.startOffset) || 0,
+        duration: Math.max(Number(t.duration) || 1, 0.5),
+        buffer: Number(t.buffer) || 0,
         dependencies: t.dependencies || [],
         description: t.description,
         complexity: t.complexity || "Medium",
@@ -107,7 +216,6 @@ const App: React.FC = () => {
         }))
       }));
 
-      // ENFORCE DEPENDENCIES VIA ALGORITHM
       finalTasks = recalculateSchedule(finalTasks);
 
       const finalProject: ProjectData = {
@@ -121,6 +229,7 @@ const App: React.FC = () => {
       setProjectData(finalProject);
       setAppState('READY');
       setAgentStatus({ active: false, name: AgentType.MANAGER, message: '' });
+      setShowDetailsPulse(true);
       
       setMessages([{
         id: 'init',
@@ -128,15 +237,42 @@ const App: React.FC = () => {
         agent: AgentType.MANAGER,
         timestamp: Date.now(),
         text: refinedPlanRaw.assumptions?.length 
-          ? `I've created your plan! Since some details were missing, I made a few assumptions (see chart). You can check the "Details" tab for a deep dive.`
-          : `I've created your plan! Check the "Details" tab to see subtasks and complexity analysis.`
+          ? `I've created your plan! I had to make a few assumptions (see chart). Please check the Details tab for the full breakdown. You can use this chat to refine the tasks, adjust timelines, or add new phases.`
+          : `I've created your plan! Please check the Details tab for the full breakdown. Feel free to chat with me to refine the schedule, add more tasks, or adjust the complexity.`
       }]);
+      
+      if (window.innerWidth >= 768) {
+        setIsChatOpen(true);
+      }
 
     } catch (e) {
       console.error(e);
       setAppState('IDLE');
-      alert("Failed to generate plan. Please check API key or try a simpler prompt.");
+      alert("Failed to generate plan. Please try a simpler prompt.");
     }
+  };
+
+  const handleProjectUpdate = (newData: ProjectData) => {
+    // 1. Recalculate Parent Durations based on subtasks
+    const tasksWithUpdatedDurations = newData.tasks.map(task => {
+        const subtaskSum = task.subtasks.reduce((sum, sub) => sum + (sub.duration || 0), 0);
+        // If user deleted all subtasks or they equal 0, keep at least 1 hr or previous duration if manually set? 
+        // Let's rely on sum, but ensure min 0.5.
+        const newDuration = Math.max(subtaskSum, 0.5);
+        return {
+            ...task,
+            duration: newDuration
+        };
+    });
+
+    // 2. Recalculate Schedule (Start Offsets & Critical Path)
+    const reScheduledTasks = recalculateSchedule(tasksWithUpdatedDurations);
+
+    // 3. Update State
+    setProjectData({
+        ...newData,
+        tasks: reScheduledTasks
+    });
   };
 
   const handleSendMessage = async () => {
@@ -150,22 +286,27 @@ const App: React.FC = () => {
     };
     setMessages(prev => [...prev, newUserMsg]);
     setChatInput('');
-    setMessages(prev => [...prev, { id: 'thinking', sender: 'ai', text: '...', timestamp: Date.now() }]);
+    setIsRefining(true);
+    setAgentStatus({ active: true, name: AgentType.ARCHITECT, message: "Processing your request and refining the project structure..." });
 
     try {
         const historyForAI = messages.map(m => ({ role: m.sender === 'user' ? 'user' : 'model', content: m.text }));
+        
+        // Show sub-agent activity for evaluation
+        setAgentStatus({ active: true, name: AgentType.ARCHITECT, message: "Analyzing impact of your request on the existing structure..." });
+        
         const response = await chatWithProjectManager(projectData, newUserMsg.text, historyForAI);
         
-        setMessages(prev => prev.filter(m => m.id !== 'thinking'));
-
         if (response.updatedPlan && response.updatedPlan.tasks) {
-           let updatedTasks: Task[] = response.updatedPlan.tasks.map((t: any) => ({
+            setAgentStatus({ active: true, name: AgentType.ESTIMATOR, message: "Updating time estimates and recalculating the critical path..." });
+            
+            let updatedTasks: Task[] = response.updatedPlan.tasks.map((t: any) => ({
                 id: t.id,
                 name: t.name,
                 phase: t.phase,
-                startOffset: Number(t.startOffsetHours) || 0,
-                duration: Math.max(Number(t.estimatedHours) || 1, 0.5),
-                buffer: Number(t.recommendedBufferHours) || 0,
+                startOffset: Number(t.startOffset) || 0,
+                duration: Math.max(Number(t.duration) || 0.5, 0.5),
+                buffer: Number(t.buffer) || 0,
                 dependencies: t.dependencies || [],
                 description: t.description,
                 complexity: t.complexity || "Medium",
@@ -176,7 +317,6 @@ const App: React.FC = () => {
                 }))
             }));
             
-            // Re-enforce dependencies on update
             updatedTasks = recalculateSchedule(updatedTasks);
 
             setProjectData({
@@ -186,6 +326,9 @@ const App: React.FC = () => {
                 title: response.updatedPlan.projectTitle || projectData.title
             });
         }
+
+        setAgentStatus({ active: false, name: AgentType.MANAGER, message: '' });
+        setIsRefining(false);
 
         setMessages(prev => [...prev, {
             id: Date.now().toString(),
@@ -197,7 +340,15 @@ const App: React.FC = () => {
 
     } catch (e) {
         console.error(e);
-        setMessages(prev => prev.filter(m => m.id !== 'thinking'));
+        setIsRefining(false);
+        setAgentStatus({ active: false, name: AgentType.MANAGER, message: '' });
+        setMessages(prev => [...prev, {
+            id: Date.now().toString(),
+            sender: 'ai',
+            agent: AgentType.MANAGER,
+            text: "I encountered an error while updating the plan. Please try rephrasing your request.",
+            timestamp: Date.now()
+        }]);
     }
   };
 
@@ -212,18 +363,39 @@ const App: React.FC = () => {
         </div>
         
         {appState === 'READY' && (
-           <div className="flex bg-slate-800 p-1 rounded-lg border border-slate-700">
+           <div className="flex items-center gap-4">
+              <div className="flex bg-slate-800 p-1 rounded-lg border border-slate-700">
+                <button 
+                  onClick={() => setViewMode('CHART')}
+                  className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all ${viewMode === 'CHART' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                >
+                  Gantt
+                </button>
+                <button 
+                  onClick={() => {
+                      setViewMode('DETAILS');
+                      setShowDetailsPulse(false);
+                  }}
+                  className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
+                    viewMode === 'DETAILS' 
+                      ? 'bg-primary text-white shadow' 
+                      : showDetailsPulse 
+                        ? 'bg-indigo-500/20 text-indigo-300 ring-1 ring-indigo-500/50 animate-pulse' 
+                        : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Details
+                </button>
+              </div>
+              
               <button 
-                onClick={() => setViewMode('CHART')}
-                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${viewMode === 'CHART' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:text-white'}`}
+                onClick={() => setIsChatOpen(!isChatOpen)}
+                className={`p-2 rounded-lg transition-all ${isChatOpen ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/30' : 'bg-slate-800 text-slate-400 border border-slate-700 hover:text-white'}`}
+                title={isChatOpen ? "Close Assistant" : "Open Assistant"}
               >
-                Gantt Chart
-              </button>
-              <button 
-                onClick={() => setViewMode('DETAILS')}
-                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${viewMode === 'DETAILS' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:text-white'}`}
-              >
-                Deep Details
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                </svg>
               </button>
            </div>
         )}
@@ -231,63 +403,105 @@ const App: React.FC = () => {
 
       {/* Main Content Area */}
       {appState === 'READY' && projectData ? (
-        <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 flex overflow-hidden relative">
            
            {/* LEFT PANE: MAIN CONTENT */}
-           <div className="flex-1 overflow-hidden p-4 flex flex-col min-w-0 bg-background/50">
+           <div className="flex-1 overflow-hidden p-4 flex flex-col min-w-0 bg-background/50 relative">
               {viewMode === 'CHART' ? (
                 <GanttChart data={projectData} />
               ) : (
-                <ProjectDetails data={projectData} />
+                <ProjectDetails data={projectData} onUpdate={handleProjectUpdate} />
+              )}
+
+              {/* OVERLAY VISUALIZATION FOR REFINEMENTS */}
+              {isRefining && (
+                <div className="absolute inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-8 animate-in fade-in duration-300">
+                   <div className="w-full max-w-4xl bg-surface/50 rounded-3xl p-8 border border-slate-700/50 shadow-2xl">
+                      <AgentStatusDisplay status={agentStatus} />
+                   </div>
+                </div>
               )}
            </div>
 
            {/* RIGHT PANE: CHAT */}
-           <div className="w-96 border-l border-slate-800 bg-surface flex flex-col shrink-0 shadow-2xl z-10">
-              <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex items-center justify-between">
-                 <h3 className="font-bold flex items-center gap-2 text-slate-200">
-                    <span className="text-xl">👷</span> Project Manager
-                 </h3>
-                 <span className="text-xs text-green-400 bg-green-400/10 px-2 py-1 rounded-full border border-green-400/20">Online</span>
-              </div>
-              
-              <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                {messages.map((msg) => (
-                  <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'} animate-in slide-in-from-bottom-2`}>
-                    <div className={`max-w-[85%] p-3 rounded-2xl text-sm leading-relaxed shadow-sm ${
-                      msg.sender === 'user' ? 'bg-primary text-white rounded-br-none' : 'bg-slate-700 text-slate-200 rounded-bl-none'
-                    }`}>
-                       {msg.text}
-                    </div>
+           <div className={`
+              border-l border-slate-800 bg-surface flex flex-col shrink-0 shadow-2xl z-40 
+              transition-all duration-300 ease-in-out
+              fixed inset-0 top-14 
+              md:relative md:top-auto md:inset-auto
+              ${isChatOpen ? 'translate-x-0' : 'translate-x-full md:translate-x-0'}
+              ${isChatOpen ? 'md:w-96' : 'md:w-0 md:border-l-0 md:overflow-hidden'}
+           `}>
+              <div className="flex flex-col h-full w-full overflow-hidden">
+                <div className="p-4 border-b border-slate-700 bg-slate-900/50 flex items-center justify-between shrink-0">
+                  <h3 className="font-bold flex items-center gap-2 text-slate-200">
+                      <span className="text-xl">👷</span> Project Manager
+                  </h3>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-green-400 bg-green-400/10 px-2 py-1 rounded-full border border-green-400/20">Online</span>
+                    <button 
+                      onClick={() => setIsChatOpen(false)}
+                      className="md:hidden p-1 text-slate-400 hover:text-white"
+                    >
+                      ✕
+                    </button>
                   </div>
-                ))}
-                <div ref={chatEndRef} />
-              </div>
+                </div>
+                
+                <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                  {messages.map((msg) => (
+                    <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'} animate-in slide-in-from-bottom-2`}>
+                      <div className={`max-w-[85%] p-3 rounded-2xl text-sm leading-relaxed shadow-sm ${
+                        msg.sender === 'user' ? 'bg-primary text-white rounded-br-none' : 'bg-slate-700 text-slate-200 rounded-bl-none'
+                      }`}>
+                        {msg.text}
+                      </div>
+                    </div>
+                  ))}
+                  {isRefining && (
+                    <div className="flex justify-start animate-in fade-in">
+                       <div className="bg-slate-700 text-slate-200 p-3 rounded-2xl rounded-bl-none flex items-center gap-2">
+                          <span className="flex gap-1">
+                             <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce"></span>
+                             <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:0.2s]"></span>
+                             <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:0.4s]"></span>
+                          </span>
+                       </div>
+                    </div>
+                  )}
+                  <div ref={chatEndRef} />
+                </div>
 
-              <div className="p-4 border-t border-slate-700 bg-slate-900/30">
-                <div className="flex gap-2">
-                  <textarea 
-                    className="flex-1 bg-background border border-slate-600 rounded-xl px-4 py-3 text-sm focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all placeholder-slate-500 resize-none min-h-[44px] max-h-32"
-                    placeholder="Ask to change tasks, times..."
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        handleSendMessage();
-                      }
-                    }}
-                    rows={1}
-                    style={{ height: 'auto', overflow: 'hidden' }}
-                    // Auto-resize logic
-                    ref={(el) => {
-                      if (el) {
-                        el.style.height = 'auto'; 
-                        el.style.height = el.scrollHeight + 'px';
-                      }
-                    }}
-                  />
-                  <button onClick={handleSendMessage} className="w-10 h-10 bg-primary rounded-full flex items-center justify-center hover:bg-indigo-600 transition-colors shadow-lg shadow-indigo-500/30 text-white self-end mb-1">↑</button>
+                <div className="p-4 border-t border-slate-700 bg-slate-900/30 shrink-0">
+                  <div className="flex gap-2">
+                    <textarea 
+                      className="flex-1 bg-background border border-slate-600 rounded-xl px-4 py-3 text-sm focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all placeholder-slate-500 resize-none min-h-[44px] max-h-32"
+                      placeholder="Refine the plan..."
+                      disabled={isRefining}
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          handleSendMessage();
+                        }
+                      }}
+                      rows={1}
+                      ref={(el) => {
+                        if (el) {
+                          el.style.height = 'auto'; 
+                          el.style.height = el.scrollHeight + 'px';
+                        }
+                      }}
+                    />
+                    <button 
+                      onClick={handleSendMessage} 
+                      disabled={isRefining || !chatInput.trim()}
+                      className={`w-10 h-10 rounded-full flex items-center justify-center transition-all shadow-lg text-white self-end mb-1 ${isRefining || !chatInput.trim() ? 'bg-slate-700 opacity-50 cursor-not-allowed' : 'bg-primary hover:bg-indigo-600 shadow-indigo-500/30'}`}
+                    >
+                      ↑
+                    </button>
+                  </div>
                 </div>
               </div>
            </div>
@@ -295,30 +509,53 @@ const App: React.FC = () => {
       ) : (
         /* IDLE / LOADING LAYOUT */
         <main className="flex-1 overflow-y-auto relative flex flex-col items-center justify-center p-4 min-h-[500px]">
+          {/* Background Animation for IDLE state */}
+          {appState === 'IDLE' && <ImpactBackground />}
+          
           {appState === 'IDLE' && (
-            <div className="w-full max-w-2xl text-center space-y-8 animate-in fade-in slide-in-from-bottom-8 duration-700">
+            <div className="w-full max-w-2xl text-center space-y-8 animate-in fade-in slide-in-from-bottom-8 duration-700 z-10">
                <div className="space-y-4">
-                 <h1 className="text-5xl md:text-6xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-purple-400 to-emerald-400 pb-2">
+                 <h1 className="text-5xl md:text-6xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-purple-400 to-emerald-400 pb-2 drop-shadow-sm">
                    Simplicity in Planning.
                  </h1>
-                 <p className="text-lg md:text-xl max-w-lg mx-auto leading-relaxed bg-gradient-to-r from-indigo-400 via-purple-400 to-emerald-400 text-transparent bg-clip-text animate-gradient-flow font-medium">
-                   Enter any goal. Our AI agents will distill it into a clear, actionable path with realistic timelines.
+                 <p className="text-lg md:text-xl max-w-lg mx-auto leading-relaxed text-slate-300 font-medium">
+                   Enter any goal. We will analyze it, break it down, and build a realistic schedule for you.
                  </p>
                </div>
-               <div className="relative group max-w-xl mx-auto">
+
+               <div className="relative group max-w-xl mx-auto z-10">
                   <div className="absolute -inset-1 bg-gradient-to-r from-primary to-secondary rounded-xl blur opacity-25 group-hover:opacity-50 transition duration-1000 group-hover:duration-200"></div>
-                  <div className="relative flex bg-surface rounded-xl p-2 border border-slate-700 shadow-2xl">
+                  <div className="relative flex bg-surface/90 backdrop-blur rounded-xl p-2 border border-slate-700 shadow-2xl">
                     <input 
                       type="text" 
                       value={inputValue}
                       onChange={(e) => setInputValue(e.target.value)}
                       onKeyDown={(e) => e.key === 'Enter' && handleStart()}
-                      placeholder="e.g. Plan a surprise party, Learn Python..." 
+                      placeholder="What do you want to achieve?" 
                       className="flex-1 bg-transparent border-none outline-none px-4 py-3 text-slate-100 placeholder-slate-500 text-lg"
                       autoFocus
                     />
-                    <button onClick={handleStart} className="bg-primary hover:bg-indigo-600 text-white px-8 py-3 rounded-lg font-bold transition-all transform active:scale-95">Start</button>
+                    <button onClick={() => handleStart()} className="bg-primary hover:bg-indigo-600 text-white px-8 py-3 rounded-lg font-bold transition-all transform active:scale-95">Start</button>
                   </div>
+               </div>
+
+               <div className="max-w-xl mx-auto pt-4">
+                 <p className="text-slate-500 text-xs uppercase tracking-wider font-bold mb-4">Try a robust example</p>
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {SUGGESTED_PROMPTS.map((prompt, idx) => (
+                      <button 
+                        key={idx}
+                        onClick={() => handleStart(prompt.text)}
+                        className="flex items-center gap-3 p-3 rounded-lg border border-slate-800 bg-surface/80 hover:bg-surface/90 backdrop-blur hover:border-slate-600 transition-all text-left group"
+                      >
+                         <div className="text-xl grayscale group-hover:grayscale-0 transition-all">{prompt.emoji}</div>
+                         <div>
+                            <div className="text-sm font-bold text-slate-300 group-hover:text-white">{prompt.title}</div>
+                            <div className="text-xs text-slate-500">{prompt.text}</div>
+                         </div>
+                      </button>
+                    ))}
+                 </div>
                </div>
             </div>
           )}
@@ -326,7 +563,6 @@ const App: React.FC = () => {
           {appState === 'CLARIFYING' && !agentStatus.active && clarifyingQuestions.length > 0 && (
             <div className="w-full max-w-xl bg-surface p-8 rounded-2xl border border-slate-700 shadow-2xl animate-in zoom-in duration-300">
               <h2 className="text-2xl font-bold mb-4 text-primary">Just a few details...</h2>
-              <p className="text-slate-400 mb-6">To build the perfect chart, I need to know a bit more. If you're unsure, just leave it blank and I'll make reasonable assumptions.</p>
               <div className="space-y-5">
                 {clarifyingQuestions.map((q, idx) => (
                   <div key={idx} className="space-y-2">
@@ -334,11 +570,54 @@ const App: React.FC = () => {
                     <input 
                       type="text" 
                       className="w-full bg-background border border-slate-700 rounded-lg p-3 focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all"
-                      placeholder="Optional"
+                      placeholder="Your answer"
                       onChange={(e) => setClarificationAnswers(prev => ({...prev, [q]: e.target.value}))}
                     />
                   </div>
                 ))}
+
+                {/* FILE UPLOAD SECTION */}
+                <div className="pt-4 border-t border-slate-700/50 mt-4">
+                  <label className="text-sm font-medium text-slate-300 block mb-2 flex items-center justify-between">
+                     <span>Upload Existing Plan or Reference</span>
+                     <span className="text-xs text-slate-500 font-normal">(Optional)</span>
+                  </label>
+                  <div 
+                    className="relative border-2 border-dashed border-slate-700 rounded-xl p-4 hover:border-primary/50 transition-colors bg-slate-800/30 text-center cursor-pointer group"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <input 
+                      type="file" 
+                      ref={fileInputRef}
+                      onChange={handleFileUpload}
+                      className="hidden"
+                      accept="image/*,application/pdf"
+                    />
+                    {uploadedFile ? (
+                        <div className="flex items-center justify-center gap-3">
+                            <span className="text-2xl">📄</span>
+                            <div className="text-left">
+                                <div className="text-sm font-bold text-slate-200">{uploadedFile.name}</div>
+                                <div className="text-xs text-emerald-400">Ready to analyze</div>
+                            </div>
+                            <button 
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    setUploadedFile(null);
+                                }} 
+                                className="ml-2 text-slate-500 hover:text-red-400"
+                            >✕</button>
+                        </div>
+                    ) : (
+                        <div className="py-2">
+                            <div className="text-2xl mb-1 grayscale opacity-50 group-hover:grayscale-0 group-hover:opacity-100 transition-all">📂</div>
+                            <div className="text-sm text-slate-400 font-medium">Click to upload</div>
+                            <div className="text-xs text-slate-600 mt-1">Image or PDF supported</div>
+                        </div>
+                    )}
+                  </div>
+                </div>
+
               </div>
               <button onClick={handleClarificationSubmit} className="mt-8 w-full bg-gradient-to-r from-primary to-purple-600 py-4 rounded-xl font-bold text-lg hover:opacity-90 transition-opacity shadow-lg shadow-indigo-500/20">Generate Plan</button>
             </div>

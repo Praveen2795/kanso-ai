@@ -3,7 +3,8 @@ export enum AgentType {
   ARCHITECT = 'Architect',
   ESTIMATOR = 'Estimator',
   REVIEWER = 'Reviewer',
-  MANAGER = 'Manager' // For chat
+  MANAGER = 'Manager', // For chat
+  WEB_SEARCH = 'Web Search'
 }
 
 export type ComplexityLevel = 'Low' | 'Medium' | 'High';
@@ -42,6 +43,12 @@ export interface ChatMessage {
   text: string;
   agent?: AgentType;
   timestamp: number;
+}
+
+export interface UploadedFile {
+  name: string;
+  type: string;
+  data: string; // Base64 string
 }
 
 export type AppState = 'IDLE' | 'CLARIFYING' | 'GENERATING' | 'READY';

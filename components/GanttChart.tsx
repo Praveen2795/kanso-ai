@@ -53,11 +53,11 @@ const GanttChart: React.FC<Props> = ({ data }) => {
       {/* Header Info */}
       <div className="p-6 bg-surface border-b border-slate-700 shrink-0">
         <div className="flex justify-between items-start">
-          <div>
+          <div className="flex-1 pr-6">
             <h2 className="text-2xl font-bold text-slate-100">{data.title}</h2>
-            <p className="text-slate-400 text-sm mt-1 max-w-3xl line-clamp-2">{data.description}</p>
+            <p className="text-slate-400 text-sm mt-2 leading-relaxed">{data.description}</p>
           </div>
-          <div className="text-right">
+          <div className="text-right shrink-0">
              <span className="text-xs text-slate-500 uppercase tracking-wider font-semibold">Total Duration</span>
              <div className="text-xl font-mono text-primary">
                 {isNaN(maxHours) ? '---' : Math.ceil(maxHours - 10)} Hours

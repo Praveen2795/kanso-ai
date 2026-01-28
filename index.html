@@ -19,7 +19,12 @@
             },
             animation: {
               'pulse-fast': 'pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+              'pulse-slow': 'pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite',
               'gradient-flow': 'gradient-flow 3s ease infinite',
+              'spin-slow': 'spin 10s linear infinite',
+              'reverse-spin': 'spin 15s linear infinite reverse',
+              'float-in': 'floatIn 20s linear infinite',
+              'slide-form': 'slideForm 8s ease-out infinite',
             },
             keyframes: {
               'gradient-flow': {
@@ -32,6 +37,19 @@
                   'background-position': 'right center'
                 },
               },
+              'floatIn': {
+                '0%': { transform: 'translateX(0) translateY(0) rotate(0deg)', opacity: '0' },
+                '10%': { opacity: '0.6' },
+                '80%': { opacity: '0.4' },
+                '100%': { transform: 'translateX(50vw) translateY(-20px) rotate(180deg)', opacity: '0' }
+              },
+              'slideForm': {
+                '0%': { transform: 'translateX(0) scaleX(0)', opacity: '0' },
+                '5%': { opacity: '0.8' },
+                '20%': { transform: 'translateX(20px) scaleX(1)' },
+                '80%': { opacity: '0.8', transform: 'translateX(40px) scaleX(1)' },
+                '100%': { transform: 'translateX(60px) scaleX(1)', opacity: '0' }
+              }
             }
           },
         },

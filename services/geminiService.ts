@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
-import { Task, ProjectData } from "../types";
+import { Task, ProjectData, UploadedFile } from "../types";
 
 // Helper to get client
 const getClient = () => {
@@ -49,11 +49,11 @@ const taskSchema: Schema = {
       type: Type.ARRAY, 
       items: { type: Type.STRING } 
     },
-    estimatedHours: { type: Type.NUMBER },
-    recommendedBufferHours: { type: Type.NUMBER },
-    startOffsetHours: { type: Type.NUMBER }
+    duration: { type: Type.NUMBER, description: "Total estimated hours for this task" },
+    buffer: { type: Type.NUMBER, description: "Recommended buffer hours" },
+    startOffset: { type: Type.NUMBER, description: "Hours from start of project" }
   },
-  required: ["id", "name", "phase", "estimatedHours", "recommendedBufferHours", "startOffsetHours", "complexity", "subtasks"]
+  required: ["id", "name", "phase", "duration", "buffer", "startOffset", "complexity", "subtasks"]
 };
 
 const projectPlanSchema: Schema = {
@@ -74,13 +74,39 @@ const projectPlanSchema: Schema = {
   required: ["projectTitle", "tasks"]
 };
 
+const validationSchema: Schema = {
+  type: Type.OBJECT,
+  properties: {
+    isValid: { type: Type.BOOLEAN },
+    critique: { type: Type.STRING, description: "If invalid, provide specific instructions to the agent on what to fix." }
+  },
+  required: ["isValid", "critique"]
+};
+
+const chatOutputSchema: Schema = {
+  type: Type.OBJECT,
+  properties: {
+    reply: { type: Type.STRING },
+    updatedPlan: projectPlanSchema
+  },
+  required: ["reply"]
+};
+
+const fileRelevanceSchema: Schema = {
+  type: Type.OBJECT,
+  properties: {
+    isRelevant: { type: Type.BOOLEAN },
+    reason: { type: Type.STRING }
+  },
+  required: ["isRelevant", "reason"]
+};
+
 // --- Algorithms ---
 
 // Deterministic scheduler to ensure no overlaps on dependencies
 export const recalculateSchedule = (tasks: Task[]): Task[] => {
-  // Create a map for quick access
   const taskMap = new Map<string, Task>();
-  tasks.forEach(t => taskMap.set(t.id, { ...t, startOffset: 0 })); // Reset offsets to recalculate
+  tasks.forEach(t => taskMap.set(t.id, { ...t, startOffset: 0 }));
 
   const visited = new Set<string>();
   const visiting = new Set<string>();
@@ -100,12 +126,10 @@ export const recalculateSchedule = (tasks: Task[]): Task[] => {
     let maxDependencyEnd = 0;
     if (task && task.dependencies) {
       for (const depId of task.dependencies) {
-        // Dependency must exist
         if (taskMap.has(depId)) {
           const depStart = calculateStart(depId);
           const depTask = taskMap.get(depId)!;
-          // The current task starts after the dependency finishes (duration + buffer)
-          const depEnd = depStart + depTask.duration + (depTask.buffer || 0);
+          const depEnd = depStart + (depTask.duration || 0) + (depTask.buffer || 0);
           if (depEnd > maxDependencyEnd) {
             maxDependencyEnd = depEnd;
           }
@@ -122,10 +146,7 @@ export const recalculateSchedule = (tasks: Task[]): Task[] => {
     return maxDependencyEnd;
   };
 
-  // Run calculation for all tasks
   tasks.forEach(t => calculateStart(t.id));
-
-  // Sort by start time for cleaner UI
   return Array.from(taskMap.values()).sort((a, b) => a.startOffset - b.startOffset);
 };
 
@@ -134,9 +155,12 @@ export const recalculateSchedule = (tasks: Task[]): Task[] => {
 
 export const analyzeRequest = async (topic: string, chatHistory: string[] = []) => {
   const client = getClient();
+  const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  
   const prompt = `
     You are the ANALYST Agent. Your goal is to deeply understand the user's project request.
     
+    Current Date: ${today}
     User Topic: "${topic}"
     Previous Context: ${JSON.stringify(chatHistory)}
 
@@ -161,34 +185,92 @@ export const analyzeRequest = async (topic: string, chatHistory: string[] = []) 
   return JSON.parse(response.text || "{}");
 };
 
+export const checkFileRelevance = async (topic: string, file: UploadedFile) => {
+  const client = getClient();
+  const prompt = `
+    You are a VALIDATION AGENT.
+    
+    User Topic: "${topic}"
+    Attached File: "${file.name}"
+    
+    Task: Determine if the content of the attached file is RELEVANT to the User Topic.
+    
+    Rules:
+    1. If the file contains a schedule, list, notes, diagram, or text related to "${topic}", return isRelevant: true.
+    2. If the file is completely unrelated (e.g. a selfie, a meme, a receipt for coffee) and the topic is something else (e.g. "Build a website"), return isRelevant: false.
+    3. If you are unsure or the connection is weak but possible, return isRelevant: true.
+    
+    Output JSON.
+  `;
+
+  const response = await client.models.generateContent({
+    model: "gemini-3-flash-preview", // Fast model for validation
+    contents: {
+      parts: [
+        { text: prompt },
+        {
+          inlineData: {
+            mimeType: file.type,
+            data: file.data
+          }
+        }
+      ]
+    },
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: fileRelevanceSchema
+    }
+  });
+
+  return JSON.parse(response.text || "{}");
+};
+
 /**
  * ARCHITECT AGENT
- * Focus: Structure, Dependencies, Scope.
- * Ignores precise time estimation.
+ * Creates structural backbone. Accepts optional critique from Reviewer to refine output.
  */
-export const createProjectStructure = async (topic: string, context: string) => {
+export const createProjectStructure = async (topic: string, context: string, critique?: string, file?: UploadedFile) => {
   const client = getClient();
+  const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
   
-  const prompt = `
+  let promptText = `
     You are the ARCHITECT Agent.
-    
     Goal: Create the STRUCTURAL BACKBONE of a project plan for: "${topic}".
+    Current Date: ${today}
     User Context: "${context}"
+    
+    ${file ? `**IMPORTANT: The user has attached a file (${file.name}). Use the visual/text information from this image/document to build the plan. Treat it as the primary source of truth for task names or schedule constraints if relevant.**` : ''}
 
     **Instructions:**
-    1. **Research & URLs**: Use Google Search. If user provided a URL, prioritize it. If inaccessible, note in 'assumptions'.
+    1. **Research & URLs**: Use Google Search. If user provided a URL, prioritize it.
     2. **Breakdown**: Create Phases -> Tasks -> Subtasks.
        - Each Task MUST have at least 3-5 concrete subtasks.
     3. **Dependencies**: Define logical order (Task B depends on Task A).
     4. **Output**: Return the JSON structure. 
-       - Set 'estimatedHours' and 'duration' to 0 or placeholders. The Estimator Agent will fix them later.
+       - Set 'duration' to 0 or placeholders. The Estimator Agent will fix them later.
     
     Output pure JSON.
   `;
 
+  if (critique) {
+    promptText += `\n\n**IMPORTANT FEEDBACK FROM REVIEWER (Must Fix):**\nYour previous attempt was rejected. Fix the following issues:\n${critique}`;
+  }
+
+  // Build the parts for the model
+  const parts: any[] = [{ text: promptText }];
+  
+  if (file) {
+    parts.push({
+      inlineData: {
+        mimeType: file.type,
+        data: file.data
+      }
+    });
+  }
+
   const response = await client.models.generateContent({
     model: "gemini-3-pro-preview",
-    contents: prompt,
+    contents: { parts },
     config: {
       tools: [{ googleSearch: {} }],
       responseMimeType: "application/json",
@@ -201,17 +283,51 @@ export const createProjectStructure = async (topic: string, context: string) => 
 };
 
 /**
- * ESTIMATOR AGENT
- * Focus: Realistic Bottom-Up Estimation.
- * Fills in the time gaps left by the Architect.
+ * REVIEWER AGENT (Validation Mode)
+ * Checks the Architect's structure for logical gaps before allowing Estimation.
  */
-export const estimateProjectTimelines = async (architectPlan: any) => {
+export const validateStructure = async (plan: any) => {
   const client = getClient();
-
   const prompt = `
-    You are the ESTIMATOR Agent.
+    You are the REVIEWER Agent. You are quality control for the Architect.
     
-    Input: A project structure created by the Architect.
+    Review this project structure:
+    ${JSON.stringify(plan)}
+
+    **Checklist:**
+    1. Are the dependencies logical? (e.g. You can't paint walls before building them).
+    2. Are tasks missing? (e.g. "Software Project" without "Testing" phase).
+    3. Are subtasks too vague?
+    
+    If MAJOR issues exist, set 'isValid' to false and write a SCATHING critique for the Architect to fix it.
+    If minor or no issues, set 'isValid' to true.
+  `;
+
+  const response = await client.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: validationSchema
+    }
+  });
+
+  return JSON.parse(response.text || "{}");
+};
+
+/**
+ * ESTIMATOR AGENT
+ * Calculates time. Accepts optional critique to re-calculate if Reviewer rejects it.
+ */
+export const estimateProjectTimelines = async (architectPlan: any, critique?: string) => {
+  const client = getClient();
+  const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+
+  let prompt = `
+    You are the ESTIMATOR Agent.
+    Current Date: ${today}
+    
+    Input: A project structure.
     ${JSON.stringify(architectPlan)}
 
     **Your Goal: Perform a Bottom-Up Estimation.**
@@ -221,14 +337,18 @@ export const estimateProjectTimelines = async (architectPlan: any) => {
     3. **Estimate Duration**: Assign a realistic duration (in hours) to EACH subtask.
        - Consider the 'complexity' level.
        - Be conservative. Things take longer than expected.
-    4. **Aggregation**: The 'estimatedHours' for the parent Task MUST be the sum of its subtasks.
-    5. **Buffers**: Add a 'recommendedBufferHours' (approx 20% of total) to the parent task.
+    4. **Aggregation**: The 'duration' for the parent Task MUST be the sum of its subtasks.
+    5. **Buffers**: Add a 'buffer' (approx 20% of total) to the parent task.
 
     Return the fully updated JSON with numbers filled in.
   `;
 
+  if (critique) {
+    prompt += `\n\n**IMPORTANT FEEDBACK FROM REVIEWER (Must Fix):**\nYour previous estimates were rejected. Fix the following:\n${critique}`;
+  }
+
   const response = await client.models.generateContent({
-    model: "gemini-3-pro-preview", // Using Pro for better reasoning on numbers
+    model: "gemini-3-pro-preview", 
     contents: prompt,
     config: {
       responseMimeType: "application/json",
@@ -243,22 +363,53 @@ export const estimateProjectTimelines = async (architectPlan: any) => {
   return plan;
 }
 
-export const reviewAndRefinePlan = async (currentPlan: any) => {
+/**
+ * REVIEWER AGENT (Estimation Validation Mode)
+ * Checks the Estimator's math and realism.
+ */
+export const validateEstimates = async (plan: any) => {
   const client = getClient();
-
   const prompt = `
-    You are the REVIEWER Agent. 
+    You are the REVIEWER Agent. You are quality control for the Estimator.
     
-    Review the following project plan JSON:
-    ${JSON.stringify(currentPlan)}
+    Review these time estimates:
+    ${JSON.stringify(plan)}
 
-    Checklist:
-    1. **Subtask Check**: Do tasks have concrete subtasks with specific durations? If not, add/fix them.
-    2. **Complexity Check**: Is the complexity flag accurate?
-    3. **Timeline Reality**: Are durations realistic for the complexity?
-    4. **Assumptions Check**: Ensure any fallback assumptions about URLs are clearly stated.
+    **Checklist:**
+    1. Are the times realistic? (e.g. "Build entire backend" = 1 hour is IMPOSSIBLE -> Reject).
+    2. Are buffers included?
+    3. Is the total timeline ridiculous?
     
-    Return the cleaned, validated JSON.
+    If MAJOR issues exist, set 'isValid' to false and write a critique.
+  `;
+
+  const response = await client.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: validationSchema
+    }
+  });
+
+  return JSON.parse(response.text || "{}");
+};
+
+// Final cleanup (Sanitization)
+export const reviewAndRefinePlan = async (currentPlan: any) => {
+  // This is the final pass to ensure JSON structure is perfect for the UI
+  // It acts more like a "Formatter" now that logic is validated previously.
+  const client = getClient();
+  const prompt = `
+    You are the FINAL REVIEWER.
+    Ensure this JSON is perfectly formatted for the frontend.
+    ${JSON.stringify(currentPlan)}
+    
+    Sanity check:
+    - Ensure 'duration' is > 0 for all tasks.
+    - Ensure 'dependencies' refer to real IDs.
+    
+    Return the clean JSON.
   `;
 
   const response = await client.models.generateContent({
@@ -283,26 +434,35 @@ export const chatWithProjectManager = async (
   history: {role: string, content: string}[]
 ) => {
   const client = getClient();
+  const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
   
   const systemInstruction = `
     You are the Project Manager Agent.
+    Current Date: ${today}
     Current Project: ${JSON.stringify(currentPlan)}
     
     User Request: "${userMessage}"
     
     **Instructions:**
-    1. **Safety & Relevance Guardrails**: 
+    1. **STRICT SCOPE & GUARDRAILS**: 
+       - You are dedicated EXCLUSIVELY to refining and managing this specific project plan.
+       - **DO NOT** answer general knowledge questions (e.g., "What is the capital of France?", "How do I cook pasta?", "Write a poem").
+       - **DO NOT** write code or generate content unrelated to the project tasks.
+       - If a user asks a generic question, politely refuse: "I'm here to help with your Gantt chart and project plan. Please ask me to modify tasks, adjust timelines, or explain the schedule."
        - IF the user asks about dangerous, illegal, sexually explicit, or hateful topics: Refuse immediately.
-       - IF the user asks about topics completely unrelated to project planning or the current project (e.g. "Write a poem about dogs", "Who won the 1990 world cup"): Politely decline and steer back to the plan.
     
-    2. **URL Handling**: If the user's message contains a URL, use Google Search to find information about it.
-       - If you can access/verify it, use that info to refine the plan.
-       - If you CANNOT access it, explicit state in 'reply': "I couldn't access that link, so I'm making assumptions based on your description." and proceed with best-guess updates.
+    2. **Refinement & Editing**:
+       - Your primary goal is to help the user EDIT the chart.
+       - If the user says "Make it shorter", "Add a marketing phase", or "Remove the buffer", you MUST return an 'updatedPlan'.
     
-    3. **Task ID Persistence**: When updating the plan, you MUST preserve the existing 'id' of tasks unless you are deliberately deleting them. Do not regenerate random IDs for existing tasks, or the dependencies will break.
+    3. **URL Handling**: If the user's message contains a URL, use Google Search to find information about it.
+    
+    4. **Task ID Persistence**: When updating the plan, you MUST preserve the existing 'id' of tasks unless deleting them. 
        
-    4. **Plan Updates**: If the user asks to change the plan, return "updatedPlan".
-       - Recalculate dependencies if needed.
+    5. **Plan Updates**: 
+       - If the user asks to change the plan, return "updatedPlan" with the full JSON structure including tasks.
+       - Ensure 'duration' and 'buffer' are set correctly for any modified tasks.
+       - Do not recalculate start offsets manually; the system will do it. Just ensure dependencies and durations are correct.
     
     Return JSON with 'reply' and optional 'updatedPlan'.
   `;
@@ -314,6 +474,7 @@ export const chatWithProjectManager = async (
       tools: [{ googleSearch: {} }],
       systemInstruction: systemInstruction,
       responseMimeType: "application/json",
+      responseSchema: chatOutputSchema
     }
   });
 
