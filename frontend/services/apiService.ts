@@ -298,6 +298,62 @@ class WebSocketService {
 // Export singleton instance
 export const wsService = new WebSocketService();
 
+// --- Calendar Export ---
+
+interface CalendarExportOptions {
+  startDate?: string; // YYYY-MM-DD format
+  hoursPerDay?: number;
+  includeWeekends?: boolean;
+}
+
+/**
+ * Export project plan as ICS calendar file
+ */
+export const exportToCalendar = async (
+  project: ProjectData,
+  options: CalendarExportOptions = {}
+): Promise<void> => {
+  const response = await fetch(`${API_BASE_URL}/api/export/calendar`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      project,
+      startDate: options.startDate,
+      hoursPerDay: options.hoursPerDay ?? 8,
+      includeWeekends: options.includeWeekends ?? false
+    })
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Export failed: ${response.statusText}`);
+  }
+  
+  // Get the blob and trigger download
+  const blob = await response.blob();
+  const url = window.URL.createObjectURL(blob);
+  
+  // Extract filename from Content-Disposition header or use default
+  const contentDisposition = response.headers.get('Content-Disposition');
+  let filename = 'project_plan.ics';
+  if (contentDisposition) {
+    const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+    if (filenameMatch) {
+      filename = filenameMatch[1];
+    }
+  }
+  
+  // Create download link and trigger it
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  
+  // Clean up
+  window.URL.revokeObjectURL(url);
+};
+
 // --- Legacy compatibility layer ---
 // These functions maintain backwards compatibility with the old geminiService API
 

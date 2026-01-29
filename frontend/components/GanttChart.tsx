@@ -1,5 +1,6 @@
 import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { Task, ProjectData } from '../types';
+import { exportToCalendar } from '../services/apiService';
 
 interface Props {
   data: ProjectData;
@@ -11,6 +12,17 @@ const GanttChart: React.FC<Props> = ({ data }) => {
   const [hoveredTask, setHoveredTask] = useState<{ id: string, name: string, phase: string, description?: string, duration: number, buffer?: number, type: 'TASK'|'SUBTASK' } | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const containerRef = useRef<HTMLDivElement>(null);
+  
+  // Export modal state
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportStartDate, setExportStartDate] = useState(() => {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    return tomorrow.toISOString().split('T')[0];
+  });
+  const [exportHoursPerDay, setExportHoursPerDay] = useState(8);
+  const [exportIncludeWeekends, setExportIncludeWeekends] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
 
   const toggleExpand = (taskId: string) => {
     const newSet = new Set(expandedTasks);
@@ -47,8 +59,122 @@ const GanttChart: React.FC<Props> = ({ data }) => {
 
   const scale = 24; // Pixels per hour
 
+  const handleExport = async () => {
+    setIsExporting(true);
+    try {
+      await exportToCalendar(data, {
+        startDate: exportStartDate,
+        hoursPerDay: exportHoursPerDay,
+        includeWeekends: exportIncludeWeekends
+      });
+      setShowExportModal(false);
+    } catch (error) {
+      console.error('Export failed:', error);
+      alert('Failed to export calendar. Please try again.');
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   return (
     <div className="flex flex-col h-full bg-surface/30 rounded-xl overflow-hidden shadow-2xl border border-slate-700 relative" ref={containerRef}>
+      
+      {/* Export Modal */}
+      {showExportModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-800 rounded-xl border border-slate-700 shadow-2xl max-w-md w-full">
+            <div className="p-6 border-b border-slate-700">
+              <h3 className="text-xl font-bold text-slate-100 flex items-center gap-2">
+                <span>📅</span> Export to Calendar
+              </h3>
+              <p className="text-slate-400 text-sm mt-1">
+                Download an ICS file to import into Google Calendar, Outlook, or Apple Calendar
+              </p>
+            </div>
+            
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Project Start Date
+                </label>
+                <input
+                  type="date"
+                  value={exportStartDate}
+                  onChange={(e) => setExportStartDate(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:ring-2 focus:ring-primary focus:border-transparent outline-none"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Working Hours Per Day
+                </label>
+                <select
+                  value={exportHoursPerDay}
+                  onChange={(e) => setExportHoursPerDay(Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:ring-2 focus:ring-primary focus:border-transparent outline-none"
+                >
+                  <option value={4}>4 hours (Part-time)</option>
+                  <option value={6}>6 hours</option>
+                  <option value={8}>8 hours (Standard)</option>
+                  <option value={10}>10 hours</option>
+                  <option value={12}>12 hours (Intensive)</option>
+                </select>
+              </div>
+              
+              <div className="flex items-center gap-3">
+                <input
+                  type="checkbox"
+                  id="includeWeekends"
+                  checked={exportIncludeWeekends}
+                  onChange={(e) => setExportIncludeWeekends(e.target.checked)}
+                  className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-primary focus:ring-primary focus:ring-offset-slate-800"
+                />
+                <label htmlFor="includeWeekends" className="text-sm text-slate-300">
+                  Include weekends as working days
+                </label>
+              </div>
+              
+              <div className="bg-slate-700/50 rounded-lg p-3 text-xs text-slate-400">
+                <p className="font-medium text-slate-300 mb-1">📝 What happens:</p>
+                <ul className="space-y-1 list-disc list-inside">
+                  <li>Each task becomes a calendar event</li>
+                  <li>Events block time based on task duration</li>
+                  <li>Subtasks are listed in event descriptions</li>
+                </ul>
+              </div>
+            </div>
+            
+            <div className="p-4 border-t border-slate-700 flex justify-end gap-3">
+              <button
+                onClick={() => setShowExportModal(false)}
+                className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-slate-100 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleExport}
+                disabled={isExporting}
+                className="px-4 py-2 text-sm font-medium bg-primary hover:bg-primary/80 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {isExporting ? (
+                  <>
+                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                    </svg>
+                    Exporting...
+                  </>
+                ) : (
+                  <>
+                    <span>⬇️</span> Download .ics
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       
       {/* Header Info */}
       <div className="p-6 bg-surface border-b border-slate-700 shrink-0">
@@ -57,11 +183,23 @@ const GanttChart: React.FC<Props> = ({ data }) => {
             <h2 className="text-2xl font-bold text-slate-100">{data.title}</h2>
             <p className="text-slate-400 text-sm mt-2 leading-relaxed">{data.description}</p>
           </div>
-          <div className="text-right shrink-0">
-             <span className="text-xs text-slate-500 uppercase tracking-wider font-semibold">Total Duration</span>
-             <div className="text-xl font-mono text-primary">
+          <div className="text-right shrink-0 flex flex-col items-end gap-3">
+            <div>
+              <span className="text-xs text-slate-500 uppercase tracking-wider font-semibold">Total Duration</span>
+              <div className="text-xl font-mono text-primary">
                 {isNaN(maxHours) ? '---' : Math.ceil(maxHours - 10)} Hours
-             </div>
+              </div>
+            </div>
+            <button
+              onClick={() => setShowExportModal(true)}
+              className="flex items-center gap-2 px-3 py-2 text-xs font-medium bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg transition-colors border border-slate-600"
+              title="Export to calendar"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+              Export to Calendar
+            </button>
           </div>
         </div>
         

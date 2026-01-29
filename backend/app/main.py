@@ -4,11 +4,13 @@ FastAPI application with REST API endpoints and WebSocket support.
 
 import json
 import asyncio
+from datetime import datetime
 from typing import Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from .config import get_settings
@@ -16,13 +18,15 @@ from .models import (
     AnalyzeRequest, AnalysisResponse,
     GeneratePlanRequest, PlanGenerationResult,
     ChatRequest, ChatResponse,
-    ProjectData, AgentStatusUpdate
+    ProjectData, AgentStatusUpdate,
+    CalendarExportRequest
 )
 from .agents.orchestrator import (
     analyze_request,
     generate_project_plan,
     chat_with_manager
 )
+from .calendar_export import generate_ics
 
 settings = get_settings()
 
@@ -188,6 +192,64 @@ async def chat_with_project(request: ChatRequest):
             reply=result.get("reply", "I couldn't process that request."),
             updatedPlan=updated_plan
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/export/calendar")
+async def export_to_calendar(request: CalendarExportRequest):
+    """
+    Export project plan as an ICS (iCalendar) file.
+    
+    The generated file can be imported into:
+    - Google Calendar
+    - Microsoft Outlook
+    - Apple Calendar
+    - Any iCalendar-compatible application
+    
+    The export creates calendar events for each task, blocking time
+    appropriately so users can see their workload.
+    """
+    try:
+        # Parse start date if provided
+        start_date = None
+        if request.start_date:
+            try:
+                start_date = datetime.fromisoformat(request.start_date)
+                start_date = start_date.replace(hour=9, minute=0, second=0, microsecond=0)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Invalid date format. Use YYYY-MM-DD"
+                )
+        
+        # Determine working days
+        working_days = [0, 1, 2, 3, 4]  # Mon-Fri
+        if request.include_weekends:
+            working_days = [0, 1, 2, 3, 4, 5, 6]  # All days
+        
+        # Generate ICS content
+        ics_content = generate_ics(
+            project=request.project,
+            start_date=start_date,
+            hours_per_day=request.hours_per_day,
+            working_days=working_days
+        )
+        
+        # Create safe filename
+        safe_title = "".join(c if c.isalnum() or c in " -_" else "" for c in request.project.title)
+        safe_title = safe_title[:50].strip() or "project"
+        filename = f"{safe_title.replace(' ', '_')}_plan.ics"
+        
+        return Response(
+            content=ics_content,
+            media_type="text/calendar",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            }
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

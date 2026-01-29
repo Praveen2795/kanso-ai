@@ -139,3 +139,26 @@ class PlanGenerationResult(BaseModel):
     project: ProjectData
     success: bool
     error: Optional[str] = None
+
+
+class CalendarExportRequest(BaseModel):
+    """Request to export project as calendar file"""
+    project: ProjectData
+    start_date: Optional[str] = Field(
+        default=None, 
+        alias="startDate",
+        description="ISO format date string (YYYY-MM-DD) for when to start the project"
+    )
+    hours_per_day: float = Field(
+        default=8.0, 
+        alias="hoursPerDay",
+        description="Working hours per day"
+    )
+    include_weekends: bool = Field(
+        default=False, 
+        alias="includeWeekends",
+        description="Whether to include weekends as working days"
+    )
+
+    class Config:
+        populate_by_name = True
