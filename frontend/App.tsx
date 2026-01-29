@@ -5,16 +5,9 @@ import GanttChart from './components/GanttChart';
 import ProjectDetails from './components/ProjectDetails';
 import ImpactBackground from './components/ImpactBackground';
 import { 
-  analyzeRequest, 
-  createProjectStructure, 
-  validateStructure, 
-  estimateProjectTimelines, 
-  validateEstimates, 
-  reviewAndRefinePlan, 
-  chatWithProjectManager, 
-  recalculateSchedule,
-  checkFileRelevance
-} from './services/geminiService';
+  wsService,
+  recalculateSchedule 
+} from './services/apiService';
 
 const SUGGESTED_PROMPTS = [
   { emoji: '🚀', title: 'Startup Launch', text: 'Launch a Shopify store in 30 days' },
@@ -57,17 +50,14 @@ const App: React.FC = () => {
     }
   }, [messages, isChatOpen]);
 
-  const runAgent = async (name: AgentType, message: string, action: () => Promise<any>) => {
-    setAgentStatus({ active: true, name, message });
-    try {
-      const result = await action();
-      return result;
-    } catch (error) {
-      console.error(error);
-      setAgentStatus({ active: true, name, message: "Error encountered. Retrying..." });
-      throw error;
-    }
-  };
+  // Connect to WebSocket and set up status callback
+  useEffect(() => {
+    const unsubscribe = wsService.onStatus((status) => {
+      setAgentStatus(status);
+    });
+    
+    return () => unsubscribe();
+  }, []);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -98,11 +88,8 @@ const App: React.FC = () => {
     setUploadedFile(null); // Reset file on new start
 
     try {
-      const analysis = await runAgent(
-        AgentType.ANALYST, 
-        "Analyzing project scope, verifying terms, and identifying gaps...",
-        () => analyzeRequest(finalInput)
-      );
+      // Use WebSocket service for real-time status updates
+      const analysis = await wsService.analyze(finalInput);
 
       if (analysis.needsClarification) {
         setClarifyingQuestions(analysis.questions);
@@ -127,103 +114,19 @@ const App: React.FC = () => {
   const generatePlan = async (topic: string, context: string) => {
     setAppState('GENERATING');
     try {
-      let fileToUse = uploadedFile;
-      let augmentedContext = context;
+      // Use WebSocket service for real-time status updates
+      // The backend handles: file relevance check, architect, reviewer loops, estimator, final cleanup
+      const projectData = await wsService.generate(topic, context, uploadedFile || undefined);
 
-      // 0. CHECK FILE RELEVANCE (If file exists)
-      if (uploadedFile) {
-        const relevanceCheck = await runAgent(
-          AgentType.ANALYST,
-          "Analyzing file content and verifying relevance to your goal...",
-          () => checkFileRelevance(topic, uploadedFile)
-        );
-
-        if (!relevanceCheck.isRelevant) {
-          console.log(`File ${uploadedFile.name} deemed irrelevant: ${relevanceCheck.reason}`);
-          fileToUse = null;
-          augmentedContext += `\n[System Note: User uploaded file '${uploadedFile.name}' but it was determined irrelevant and ignored. Reason: ${relevanceCheck.reason}]`;
-        }
-      }
-
-      // 1. ARCHITECT (STRUCTURE)
-      let structuralPlan = await runAgent(
-        AgentType.ARCHITECT,
-        fileToUse 
-          ? `Researching structure. Analyzing uploaded ${fileToUse.type} file for context...`
-          : "Researching workflows and designing the structure (Phases, Tasks)...",
-        () => createProjectStructure(topic, augmentedContext, undefined, fileToUse || undefined)
-      );
-
-      // 1.5. REVIEWER (STRUCTURE CHECK LOOP)
-      const structureCheck = await runAgent(
-        AgentType.REVIEWER,
-        "Validating logical dependencies and structural completeness...",
-        () => validateStructure(structuralPlan)
-      );
-
-      if (!structureCheck.isValid) {
-        structuralPlan = await runAgent(
-            AgentType.ARCHITECT,
-            `Reviewer feedback: "${structureCheck.critique}". Re-designing structure...`,
-            () => createProjectStructure(topic, augmentedContext, structureCheck.critique, fileToUse || undefined)
-        );
-      }
-
-      // 2. ESTIMATOR (TIME)
-      let estimatedPlan = await runAgent(
-        AgentType.ESTIMATOR,
-        "Calculating bottom-up estimates for every subtask...",
-        () => estimateProjectTimelines(structuralPlan)
-      );
-
-      // 2.5 REVIEWER (TIME CHECK LOOP)
-      const timeCheck = await runAgent(
-        AgentType.REVIEWER,
-        "Sanity checking time estimates and buffer allocations...",
-        () => validateEstimates(estimatedPlan)
-      );
-
-      if (!timeCheck.isValid) {
-        estimatedPlan = await runAgent(
-             AgentType.ESTIMATOR,
-             `Reviewer feedback: "${timeCheck.critique}". Recalculating estimates...`,
-             () => estimateProjectTimelines(structuralPlan, timeCheck.critique)
-        );
-      }
-
-      // 3. FINAL CLEANUP
-      const refinedPlanRaw = await runAgent(
-        AgentType.REVIEWER,
-        "Finalizing schedule and formatting output...",
-        () => reviewAndRefinePlan(estimatedPlan)
-      );
-
-      // Strict Parsing & Recalculation
-      let finalTasks: Task[] = refinedPlanRaw.tasks.map((t: any) => ({
-        id: t.id,
-        name: t.name,
-        phase: t.phase,
-        startOffset: Number(t.startOffset) || 0,
-        duration: Math.max(Number(t.duration) || 1, 0.5),
-        buffer: Number(t.buffer) || 0,
-        dependencies: t.dependencies || [],
-        description: t.description,
-        complexity: t.complexity || "Medium",
-        subtasks: (t.subtasks || []).map((st: any) => ({
-            name: st.name,
-            description: st.description,
-            duration: Number(st.duration) || 0.5 
-        }))
-      }));
-
-      finalTasks = recalculateSchedule(finalTasks);
+      // The backend already schedules tasks, but we ensure local consistency
+      let finalTasks = recalculateSchedule(projectData.tasks);
 
       const finalProject: ProjectData = {
-        title: refinedPlanRaw.projectTitle,
-        description: refinedPlanRaw.projectSummary,
-        assumptions: refinedPlanRaw.assumptions || [],
+        title: projectData.title,
+        description: projectData.description,
+        assumptions: projectData.assumptions || [],
         tasks: finalTasks,
-        totalDuration: 0 
+        totalDuration: projectData.totalDuration || 0 
       };
 
       setProjectData(finalProject);
@@ -236,7 +139,7 @@ const App: React.FC = () => {
         sender: 'ai',
         agent: AgentType.MANAGER,
         timestamp: Date.now(),
-        text: refinedPlanRaw.assumptions?.length 
+        text: projectData.assumptions?.length 
           ? `I've created your plan! I had to make a few assumptions (see chart). Please check the Details tab for the full breakdown. You can use this chat to refine the tasks, adjust timelines, or add new phases.`
           : `I've created your plan! Please check the Details tab for the full breakdown. Feel free to chat with me to refine the schedule, add more tasks, or adjust the complexity.`
       }]);
@@ -287,43 +190,23 @@ const App: React.FC = () => {
     setMessages(prev => [...prev, newUserMsg]);
     setChatInput('');
     setIsRefining(true);
-    setAgentStatus({ active: true, name: AgentType.ARCHITECT, message: "Processing your request and refining the project structure..." });
+    setAgentStatus({ active: true, name: AgentType.MANAGER, message: "Processing your request..." });
 
     try {
         const historyForAI = messages.map(m => ({ role: m.sender === 'user' ? 'user' : 'model', content: m.text }));
         
-        // Show sub-agent activity for evaluation
-        setAgentStatus({ active: true, name: AgentType.ARCHITECT, message: "Analyzing impact of your request on the existing structure..." });
-        
-        const response = await chatWithProjectManager(projectData, newUserMsg.text, historyForAI);
+        // Use WebSocket service for real-time status updates
+        const response = await wsService.chat(projectData, newUserMsg.text, historyForAI);
         
         if (response.updatedPlan && response.updatedPlan.tasks) {
-            setAgentStatus({ active: true, name: AgentType.ESTIMATOR, message: "Updating time estimates and recalculating the critical path..." });
-            
-            let updatedTasks: Task[] = response.updatedPlan.tasks.map((t: any) => ({
-                id: t.id,
-                name: t.name,
-                phase: t.phase,
-                startOffset: Number(t.startOffset) || 0,
-                duration: Math.max(Number(t.duration) || 0.5, 0.5),
-                buffer: Number(t.buffer) || 0,
-                dependencies: t.dependencies || [],
-                description: t.description,
-                complexity: t.complexity || "Medium",
-                subtasks: (t.subtasks || []).map((st: any) => ({
-                    name: st.name,
-                    description: st.description,
-                    duration: Number(st.duration) || 0.5
-                }))
-            }));
-            
-            updatedTasks = recalculateSchedule(updatedTasks);
+            let updatedTasks = recalculateSchedule(response.updatedPlan.tasks);
 
             setProjectData({
                 ...projectData,
                 tasks: updatedTasks,
                 assumptions: response.updatedPlan.assumptions || projectData.assumptions,
-                title: response.updatedPlan.projectTitle || projectData.title
+                title: response.updatedPlan.title || projectData.title,
+                description: response.updatedPlan.description || projectData.description
             });
         }
 
