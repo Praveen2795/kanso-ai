@@ -1,13 +1,11 @@
 # Kanso.AI - AI-Powered Project Planning
 
 <div align="center">
-<img width="1200" height="475" alt="Kanso.AI" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
 
 **Transform any goal into a detailed, actionable project plan with AI**
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
 [![React](https://img.shields.io/badge/React-19-61DAFB.svg)](https://react.dev)
-[![Google ADK](https://img.shields.io/badge/Google_ADK-1.23+-4285F4.svg)](https://github.com/google/adk-python)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
 
 </div>
@@ -58,7 +56,7 @@ kanso-ai/
 │   └── services/
 │       └── apiService.ts        # REST API & WebSocket client
 │
-├── backend/                     # FastAPI + Python + Google ADK
+├── backend/                     # FastAPI + Python
 │   ├── run.py                   # Server entry point
 │   ├── pyproject.toml           # Python dependencies
 │   └── app/
@@ -83,19 +81,19 @@ kanso-ai/
 
 ## 🤖 Multi-Agent System
 
-The heart of Kanso.AI is a **collaborative multi-agent workflow** built on [Google's Agent Development Kit (ADK)](https://github.com/google/adk-python). Each agent has a specialized role:
+The heart of Kanso.AI is a **collaborative multi-agent workflow**. Each agent has a specialized role:
 
 ### Agent Roles
 
-| Agent | Model | Responsibility |
-|-------|-------|----------------|
-| **Analyst** | `gemini-2.5-pro` | Analyzes user requests, identifies ambiguities, asks clarifying questions |
-| **Architect** | `gemini-2.5-pro` | Designs project structure: phases, tasks, subtasks, and dependencies |
-| **Structure Reviewer** | `gemini-2.5-flash` | Validates logical dependencies and structural completeness |
-| **Estimator** | `gemini-2.5-pro` | Bottom-up time estimation with complexity-based buffer allocation |
-| **Estimate Reviewer** | `gemini-2.5-flash` | Sanity-checks time estimates and buffer percentages |
-| **Final Reviewer** | `gemini-2.5-flash` | Polishes output format and ensures consistency |
-| **Manager** | `gemini-2.5-pro` | Handles conversational refinements to the plan |
+| Agent | Responsibility |
+|-------|----------------|
+| **Analyst** | Analyzes user requests, identifies ambiguities, asks clarifying questions |
+| **Architect** | Designs project structure: phases, tasks, subtasks, and dependencies |
+| **Structure Reviewer** | Validates logical dependencies and structural completeness |
+| **Estimator** | Bottom-up time estimation with complexity-based buffer allocation |
+| **Estimate Reviewer** | Sanity-checks time estimates and buffer percentages |
+| **Final Reviewer** | Polishes output format and ensures consistency |
+| **Manager** | Handles conversational refinements to the plan |
 
 ### Agent Pipeline Flow
 
@@ -206,7 +204,7 @@ When the Manager agent updates the plan during chat, a **merge strategy** preser
 
 - **Python 3.11+** 
 - **Node.js 18+**
-- **Google API Key** with access to Gemini models
+- **LLM API Key** (see configuration)
 
 ### 1. Clone the Repository
 
@@ -231,10 +229,10 @@ pip install -e .
 cp .env.example .env
 ```
 
-Edit `backend/.env` and add your Google API key:
+Edit `backend/.env` and add your API key:
 
 ```env
-GOOGLE_API_KEY=your_api_key_here
+API_KEY=your_api_key_here
 ```
 
 Start the backend server:
@@ -301,12 +299,12 @@ curl -X POST http://localhost:8000/api/generate \
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `GOOGLE_API_KEY` | Google AI API Key | **Required** |
+| `API_KEY` | LLM API Key | **Required** |
 | `HOST` | Server host | `0.0.0.0` |
 | `PORT` | Server port | `8000` |
 | `CORS_ORIGINS` | Allowed CORS origins | `http://localhost:5173,http://localhost:3000` |
-| `DEFAULT_MODEL` | Fast model for reviewers | `gemini-2.5-flash` |
-| `PRO_MODEL` | Pro model for complex tasks | `gemini-2.5-pro` |
+| `DEFAULT_MODEL` | Fast model for reviewers | (configured in backend) |
+| `PRO_MODEL` | Pro model for complex tasks | (configured in backend) |
 
 ### Frontend Environment Variables
 
@@ -362,8 +360,7 @@ npm run build
 | Technology | Purpose |
 |------------|---------|
 | [FastAPI](https://fastapi.tiangolo.com/) | High-performance Python web framework |
-| [Google ADK](https://github.com/google/adk-python) | Agent Development Kit for multi-agent orchestration |
-| [Google GenAI](https://ai.google.dev/) | Gemini model access |
+
 | [Pydantic](https://docs.pydantic.dev/) | Data validation and serialization |
 | [Uvicorn](https://www.uvicorn.org/) | ASGI server |
 
@@ -424,7 +421,7 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
 
 <div align="center">
 
-**Built with ❤️ using Google's Agent Development Kit**
+**Built with ❤️**
 
 [Report Bug](https://github.com/yourusername/kanso-ai/issues) · [Request Feature](https://github.com/yourusername/kanso-ai/issues)
 

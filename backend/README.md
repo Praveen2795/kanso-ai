@@ -1,10 +1,10 @@
 # Kanso.AI Backend
 
-AI-powered project planning backend built with FastAPI and Google ADK multi-agent system.
+AI-powered project planning backend built with FastAPI and a multi-agent system.
 
 ## Architecture
 
-This backend implements a multi-agent system using Google's Agent Development Kit (ADK):
+This backend implements a multi-agent system for intelligent project planning:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -56,7 +56,7 @@ This backend implements a multi-agent system using Google's Agent Development Ki
 ### Prerequisites
 
 - Python 3.11+
-- Google API Key with Gemini access
+- LLM API Key (see configuration)
 
 ### Installation
 
@@ -76,7 +76,7 @@ pip install -e ".[dev]"
 3. Configure environment:
 ```bash
 cp .env.example .env
-# Edit .env and add your GOOGLE_API_KEY
+# Edit .env and add your API_KEY
 ```
 
 ### Running the Server
@@ -163,7 +163,7 @@ backend/
 │       ├── reviewer.py    # Reviewer Agents
 │       ├── manager.py     # Project Manager Agent
 │       ├── orchestrator.py # Agent pipeline orchestration
-│       ├── schemas.py     # Gemini output schemas
+       ├── output_schemas.py # Output schemas
 │       ├── scheduler.py   # Task scheduling algorithm
 │       └── tools.py       # Agent tools
 ├── tests/
