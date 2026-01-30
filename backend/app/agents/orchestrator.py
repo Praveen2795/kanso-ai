@@ -4,7 +4,6 @@ Implements the agent pipeline with validation loops.
 """
 
 import json
-import logging
 import os
 from typing import AsyncGenerator, Callable, Any
 
@@ -17,6 +16,7 @@ from ..models import (
     ComplexityLevel, UploadedFile
 )
 from ..config import get_settings
+from ..logging_config import get_logger, log_execution_time
 
 # Ensure GOOGLE_API_KEY is set in environment for ADK
 settings = get_settings()
@@ -32,9 +32,8 @@ from .manager import create_manager_agent
 from .scheduler import recalculate_schedule, calculate_total_duration
 
 
-# Setup logging
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+# Setup logging using centralized config
+logger = get_logger(__name__)
 
 # Session service for ADK runners
 session_service = InMemorySessionService()
@@ -60,7 +59,10 @@ async def run_agent_with_status(
     Returns:
         Parsed JSON response from the agent
     """
-    logger.info(f"Running agent: {agent.name} with message length: {len(user_message)}")
+    logger.info(
+        f"Running agent: {agent.name}",
+        extra={'extra_data': {'agent': agent.name, 'message_length': len(user_message)}}
+    )
     
     if status_callback:
         await status_callback(AgentStatusUpdate(
@@ -83,7 +85,7 @@ async def run_agent_with_status(
             user_id="kanso_user"
         )
         
-        logger.info(f"Session created: {session.id}")
+        logger.debug(f"Session created", extra={'extra_data': {'session_id': session.id}})
         
         result_text = ""
         
@@ -100,7 +102,7 @@ async def run_agent_with_status(
         ):
             # Log event type for debugging
             event_type = type(event).__name__
-            logger.debug(f"Received event: {event_type}")
+            logger.debug(f"Received event", extra={'extra_data': {'event_type': event_type}})
             
             # Collect text from agent responses
             if hasattr(event, 'content') and event.content:
@@ -108,20 +110,29 @@ async def run_agent_with_status(
                     for part in event.content.parts:
                         if hasattr(part, 'text') and part.text:
                             result_text = part.text
-                            logger.info(f"Got response text length: {len(result_text)}")
+                            logger.debug(f"Got response", extra={'extra_data': {'response_length': len(result_text)}})
         
         # Parse JSON response
         try:
             parsed = json.loads(result_text) if result_text else {}
-            logger.info(f"Agent {agent.name} completed successfully")
+            logger.info(
+                f"Agent completed successfully",
+                extra={'extra_data': {'agent': agent.name, 'response_keys': list(parsed.keys()) if isinstance(parsed, dict) else 'non-dict'}}
+            )
             return parsed
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON from {agent.name}: {e}")
-            logger.error(f"Raw response: {result_text[:500]}...")
+            logger.error(
+                f"Failed to parse JSON from agent",
+                extra={'extra_data': {'agent': agent.name, 'error': str(e), 'raw_preview': result_text[:200]}}
+            )
             return {"error": "Failed to parse agent response", "raw": result_text}
             
     except Exception as e:
-        logger.error(f"Agent {agent.name} failed with error: {e}")
+        logger.error(
+            f"Agent failed",
+            extra={'extra_data': {'agent': agent.name, 'error': str(e)}},
+            exc_info=True
+        )
         raise
 
 
