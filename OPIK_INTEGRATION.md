@@ -1,293 +1,380 @@
-# 🔭 Opik Observability Integration - Kanso.AI
+# 🔭 Opik Integration — Kanso.AI
 
 ## Overview
 
-Kanso.AI is an AI-powered project planning tool that uses a **multi-agent system** built with Google's Agent Development Kit (ADK). The system orchestrates 6 specialized AI agents to generate comprehensive project plans.
+Kanso.AI is an AI-powered project planning tool that uses a **multi-agent system** (7 specialized agents) built with [Google ADK](https://google.github.io/adk-docs/) to transform any goal into a dependency-aware Gantt chart. **[Opik](https://github.com/comet-ml/opik)** by Comet is deeply integrated across the entire system for observability, evaluation, prompt optimization, and continuous quality improvement.
 
-This document explains how **Opik** by Comet is deeply integrated for observability, evaluation, and continuous improvement.
-
-> **Note**: This integration follows patterns established in [commit-coach](https://github.com/Praveen2795/commit-coach), ensuring consistency across projects.
+> **Dashboard**: [https://www.comet.com/opik/praveen170/kanso-ai](https://www.comet.com/opik/praveen170/kanso-ai)
 
 ---
 
-## 🎯 Key Opik Integration Features
+## Table of Contents
 
-### 1. **Full Agent Pipeline Tracing**
+1. [Full-Pipeline Tracing](#1-full-pipeline-tracing)
+2. [Datasets & Experiments](#2-datasets--experiments)
+3. [Built-in LLM-as-Judge Metrics](#3-built-in-llm-as-judge-metrics)
+4. [Online Evaluation Rules](#4-online-evaluation-rules)
+5. [Opik Agent Optimizer](#5-opik-agent-optimizer)
+6. [Rich Trace Metadata](#6-rich-trace-metadata)
+7. [Architecture](#7-architecture)
+8. [Experiment Results](#8-experiment-results)
+9. [Running Evaluations](#9-running-evaluations)
+10. [Key Files](#10-key-files)
 
-Every request flows through our multi-agent pipeline with complete visibility:
+---
+
+## 1. Full-Pipeline Tracing
+
+Every request flows through the multi-agent pipeline with **complete trace visibility** via `OpikTracer` from the official ADK integration:
 
 ```
-User Request → Analyst → Researcher → Architect → Reviewer → Estimator → Manager
-                 ↑                                              ↓
-              Opik traces every LLM call, tool use, and decision
+User Request → Analyst → Researcher → Architect → Structure Reviewer
+                                                          ↓ (validation loop)
+                                                   Estimator → Estimate Reviewer
+                                                          ↓ (validation loop)
+                                                   Final Reviewer → Scheduler → Gantt Chart
 ```
 
-**What's Traced:**
-- All LLM calls with input/output
-- Agent execution times
-- Token usage per agent
-- Tool calls (Google Search for research)
+**What's Traced** (per request):
+- All LLM calls with full input/output payloads
+- Agent execution times with millisecond precision
+- Token usage per agent (input + output tokens)
+- Tool calls (Google Search grounding, web research)
+- Validation loop iterations and reviewer decisions
 - Error states and retries
 
-### 2. **LLM-as-Judge Online Evaluations**
-
-After every plan generation, Opik runs **3 automatic quality evaluations**:
-
-| Metric | What It Measures | Weight |
-|--------|------------------|--------|
-| **Plan Structure Score** | Logical dependencies, task granularity, phase organization | 30% |
-| **Estimate Reasonableness** | Realistic durations, appropriate buffers, complexity alignment | 30% |
-| **Plan Completeness** | Requirement coverage, goal alignment, missing tasks detection | 40% |
-
-These scores are automatically logged to each trace for:
-- Quality monitoring over time
-- Identifying regression in model performance
-- A/B testing different prompt strategies
-
-### 3. **Google ADK Integration**
-
-Kanso.AI uses `OpikTracer` from the official Opik ADK integration:
-
+**Implementation** (`app/opik_service.py`):
 ```python
-from opik.integrations.adk import OpikTracer, track_adk_agent_recursive
+from opik.integrations.adk import OpikTracer
 
-# Create tracer with metadata
 tracer = OpikTracer(
-    name="kanso-analyst-agent",
+    name="kanso-pipeline",
     tags=["kanso-ai", "project-planning", "multi-agent"],
     metadata={
-        "environment": "production",
         "model": "gemini-2.5-pro",
-        "framework": "google-adk"
+        "judge_model": "gemini-2.5-flash",
+        "framework": "google-adk",
     },
-    project_name="kanso-ai"
+    project_name="kanso-ai",
 )
-
-# Instrument all agents recursively
-track_adk_agent_recursive(agent, tracer)
 ```
 
-### 4. **Tracking Decorators (commit-coach Pattern)**
+---
 
-Following the established patterns from commit-coach:
+## 2. Datasets & Experiments
 
+A curated **benchmark dataset** (`kanso-planning-benchmark`) with 12 diverse project planning requests is used for systematic evaluation:
+
+| Category | Examples | Purpose |
+|----------|----------|---------|
+| **Simple/Clear** | Portfolio site, TODO API | Baseline — agent should NOT over-complicate |
+| **Moderate/Vague** | E-commerce store, CI/CD pipeline | Should ask clarifications, handle ambiguity |
+| **Complex/Enterprise** | Real-time analytics, microservices | Multi-phase with many dependencies |
+| **Non-Software** | Podcast launch, home renovation | Domain variety — not just tech |
+
+Each item includes `input`, `context`, `expected_traits` (min/max tasks, expected phases, complexity level), `difficulty`, and `tags`.
+
+**Two experiment types**:
+
+| Experiment | Pipeline | Agents Tested | Metrics |
+|------------|----------|---------------|---------|
+| **`analyst`** | Analyst only | Clarification detection | 4 metrics (custom + built-in) |
+| **`plan`** | Full 6-agent pipeline | End-to-end plan quality | 9 metrics (custom + built-in) |
+
+**Usage**:
+```bash
+# Seed the benchmark dataset (idempotent)
+uv run python run_evaluation.py --seed
+
+# Run experiments
+uv run python run_evaluation.py --experiment analyst --name "analyst-v1"
+uv run python run_evaluation.py --experiment plan --name "plan-v1"
+```
+
+---
+
+## 3. Built-in LLM-as-Judge Metrics
+
+Experiments combine **custom heuristic metrics** with **Opik's built-in LLM-as-judge metrics** (via LiteLLM → Gemini):
+
+### Custom Metrics (deterministic, zero API calls)
+
+| Metric | Type | What It Measures |
+|--------|------|------------------|
+| `plan_structure_completeness` | Heuristic | All required fields present (title, tasks, phases, deps, subtasks) |
+| `task_count_reasonableness` | Heuristic | Task count within expected range for project complexity |
+| `duration_realism` | Heuristic | No task < 0.5h or > 80h, buffer ≤ duration |
+| `plan_quality_llm_judge` | LLM Judge | Holistic evaluation of requirement coverage, granularity, flow |
+| `clarification_quality` | LLM Judge | Analyst correctly identifies ambiguity, asks specific questions |
+
+### Opik Built-in Metrics (LLM-as-judge via `gemini/gemini-2.5-flash`)
+
+| Metric | Built-in Class | What It Measures |
+|--------|---------------|------------------|
+| `hallucination_metric` | `Hallucination` | Detects fabricated information not grounded in input |
+| `answer_relevance_metric` | `AnswerRelevance` | Plan addresses the original request |
+| `moderation_metric` | `Moderation` | Content safety check |
+| `is_json_metric` | `IsJson` | Pipeline output is valid JSON |
+| `g_eval_metric` | `GEval` | Custom criteria: logical tasks, appropriate granularity |
+
+**All 9 metrics run together** in plan experiments, producing a comprehensive quality profile per sample.
+
+---
+
+## 4. Online Evaluation Rules
+
+Four **automated evaluation rules** are configured via the Opik REST API to run on every trace in production — no manual experiment needed:
+
+| Rule | Metric Type | What It Does |
+|------|-------------|-------------|
+| **Hallucination Detection** | `Hallucination` | Flags traces where the plan contains fabricated information |
+| **Content Safety** | `Moderation` | Ensures all outputs pass content safety checks |
+| **Plan Relevance** | `AnswerRelevance` | Verifies the plan actually addresses the user's request |
+| **Plan Quality** | Custom LLM Judge | Domain-specific evaluation of plan structure and completeness |
+
+All rules use `gpt-4o-mini` as the judge, with 100% trace sampling.
+
+**Setup** (one-time):
+```bash
+uv run python setup_online_rules.py
+```
+
+**Implementation** (`setup_online_rules.py`) uses the Opik REST API:
 ```python
-from opik_service import track_agent_run, track_tool_call
-
-@track_agent_run(agent_name="architect")
-async def create_project_structure():
-    # Automatically tracks:
-    # - Agent name and model
-    # - Framework (google-adk)
-    # - Execution span
-    pass
-
-@track_tool_call(tool_name="google_search")
-def search_web(query: str):
-    # Tracks tool calls separately
-    pass
-```
-
-### 5. **Agent Callbacks**
-
-Before/after callbacks for detailed tracing:
-
-```python
-from opik_service import opik_before_agent_callback, opik_after_agent_callback
-
-# Before agent runs
-opik_before_agent_callback(
-    agent_name="architect",
-    invocation_context={"topic": "AI project"}
-)
-
-# After agent completes
-opik_after_agent_callback(
-    agent_name="architect",
-    result="Generated structure with 5 phases"
-)
-```
-
-### 6. **User Feedback Collection**
-
-Users can rate generated plans, which feeds back into Opik:
-
-```
-POST /api/feedback
+POST /v1/private/automations/evaluators/
 {
-    "trace_id": "abc123",
-    "score": 0.85,
-    "category": "user_satisfaction",
-    "comment": "Great plan but missing security phase"
+    "name": "Hallucination Detection",
+    "project_id": "019c1bb1-...",
+    "sampling_rate": 1.0,
+    "model": { "name": "gpt-4o-mini", "temperature": 0 },
+    "code": { "type": "hallucination", ... }
 }
 ```
 
-This creates a feedback loop for:
-- Identifying low-quality outputs
-- Correlating user satisfaction with evaluation scores
-- Improving prompts based on real feedback
-
-### 7. **Trace Flushing**
-
-Traces are automatically flushed:
-- After each plan generation
-- On application shutdown
-
-```python
-from opik_service import flush_traces
-
-# Ensure all traces are sent to Opik
-flush_traces()
-```
-
 ---
 
-## 📊 Opik Dashboard Insights
+## 5. Opik Agent Optimizer
 
-### Trace View
-See the complete execution flow of any plan generation:
-- Nested spans for each agent
-- Token counts and costs
-- Input/output for every LLM call
-- Tool calls (Google Search, etc.)
+Uses **`opik-optimizer` SDK** (v3.0.1) with `MetaPromptOptimizer` to automatically improve agent system prompts:
 
-### Evaluation Trends
-Track quality over time:
-- Average quality scores per day
-- Score distributions
-- Identification of degradation
+### What Gets Optimized
 
-### Cost Analysis
-Monitor API spending:
-- Cost per plan generation
-- Cost breakdown by agent
-- Token usage optimization opportunities
+| Agent | Prompt Optimized | Metric | Goal |
+|-------|-----------------|--------|------|
+| **Analyst** | System prompt for clarification detection | Fast heuristic (JSON structure, question quality, reasoning, alignment) | Better ambiguity detection |
+| **Architect** | System prompt for plan generation | Fast heuristic (plan structure, task count, required fields, relevance) | Better plan quality |
 
----
+### How It Works
 
-## 🏗️ Architecture
+1. **Dataset**: Uses the benchmark dataset items as optimization training data
+2. **Prompt Template**: `ChatPrompt` with system + user messages, template variable `{question}`
+3. **MetaPromptOptimizer**: Uses an LLM "reasoning model" to critique and iteratively refine the prompt
+4. **Fast Metrics**: Deterministic heuristic scoring (zero API calls) — enables rapid iteration across many trials
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                        Kanso.AI Backend                           │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                   │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────┐  │
-│  │   FastAPI   │───▶│ Orchestrator│───▶│ Google ADK Agents   │  │
-│  │   Server    │    │   Layer     │    │ (Analyst, Architect │  │
-│  └─────────────┘    └──────┬──────┘    │  Estimator, etc.)   │  │
-│                            │           └─────────────────────┘  │
-│                            │                      │              │
-│                            ▼                      ▼              │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │                    Opik Observability                       │ │
-│  │  ┌──────────┐  ┌──────────────┐  ┌─────────────────────┐  │ │
-│  │  │ Tracing  │  │ Evaluations  │  │ Feedback Collection │  │ │
-│  │  │ (ADK)    │  │ (LLM Judge)  │  │ (User Ratings)      │  │ │
-│  │  └──────────┘  └──────────────┘  └─────────────────────┘  │ │
-│  └────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-                    ┌───────────────────────┐
-                    │   Comet.com Opik      │
-                    │   Dashboard           │
-                    │   - Trace Viewer      │
-                    │   - Evaluation Charts │
-                    │   - Cost Analysis     │
-                    └───────────────────────┘
-```
-
----
-
-## 🚀 Getting Started
-
-### 1. Set Up Opik Account
-Create a free account at [https://www.comet.com/signup](https://www.comet.com/signup)
-
-### 2. Configure Environment
 ```bash
-# In backend/.env
-OPIK_API_KEY=your_api_key
-OPIK_WORKSPACE=your_workspace
-OPIK_PROJECT_NAME=kanso-ai
+# Dry-run to see configuration
+uv run python optimize_prompts.py --agent analyst --dry-run
+
+# Run optimization (3 trials, 4 samples each)
+uv run python optimize_prompts.py --agent analyst --trials 3 --samples 4
+
+# Architect optimization
+uv run python optimize_prompts.py --agent architect --trials 3 --samples 6
 ```
 
-### 3. Start the Server
+### Design Decision: Fast Heuristic Metrics
+
+The optimizer metrics are intentionally **lightweight and deterministic** (no LLM API calls). This was critical because:
+
+- The optimizer evaluates many candidates × many samples per trial
+- LLM-as-judge metrics are too slow and expensive for optimization loops
+- Deterministic metrics prevent the optimizer from chasing noise
+- This follows Opik's own [metric design guidelines](https://www.comet.com/docs/opik/agent_optimization/optimization/define_metrics)
+
+---
+
+## 6. Rich Trace Metadata
+
+Every trace is enriched with detailed metadata beyond basic LLM input/output:
+
+### Pipeline-Level Metadata (on `generate_project_plan` traces)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `pipeline_elapsed_seconds` | float | Total wall-clock time for the entire pipeline |
+| `stage_timings` | dict | Per-stage timing: architecture, estimation, finalize |
+| `architecture_iterations` | int | How many times the architect was asked to revise |
+| `estimation_iterations` | int | How many times the estimator was asked to revise |
+| `structure_validated` | bool | Did the structure pass review? |
+| `estimates_validated` | bool | Did the estimates pass review? |
+| `complexity_distribution` | dict | Count of Low/Medium/High complexity tasks |
+| `has_research_context` | bool | Whether web research was used |
+
+### Agent-Level Metadata (per-span via `opik_context.update_current_span()`)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `agent_name` | string | Which agent (analyst, architect, estimator, etc.) |
+| `agent_type` | string | `pro_model` or `default_model` |
+| `execution_time_ms` | float | Agent execution time in milliseconds |
+| `response_length` | int | Character count of agent response |
+| `model` | string | Model name (e.g., `gemini-2.5-pro`) |
+
+### Function-Level Metadata
+
+| Function | Tracked Fields |
+|----------|---------------|
+| `analyze_request` | topic_length, has_chat_history, needs_clarification, question_count, elapsed_seconds |
+| `chat_with_manager` | message_length, history_turns, project_task_count, has_plan_update, reply_length, elapsed_seconds |
+
+---
+
+## 7. Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                           Kanso.AI Backend                                │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  ┌──────────────┐    ┌───────────────┐    ┌────────────────────────┐    │
+│  │   FastAPI     │───▶│ Orchestrator  │───▶│   Google ADK Agents    │    │
+│  │   Server      │    │   Pipeline    │    │   (7 agents)           │    │
+│  └──────────────┘    └───────┬───────┘    └──────────┬─────────────┘    │
+│                              │                        │                   │
+│                     ┌────────▼────────────────────────▼──────────────┐   │
+│                     │              Opik Integration                    │   │
+│                     │                                                 │   │
+│                     │  ┌──────────┐  ┌──────────────┐  ┌──────────┐ │   │
+│                     │  │ Tracing  │  │ Evaluations  │  │ Online   │ │   │
+│                     │  │ (ADK     │  │ (Datasets,   │  │ Rules    │ │   │
+│                     │  │  Tracer) │  │  Experiments,│  │ (Auto    │ │   │
+│                     │  │          │  │  9 Metrics)  │  │  Eval)   │ │   │
+│                     │  └──────────┘  └──────────────┘  └──────────┘ │   │
+│                     │                                                 │   │
+│                     │  ┌──────────────────┐  ┌─────────────────────┐ │   │
+│                     │  │ Agent Optimizer  │  │  Rich Metadata      │ │   │
+│                     │  │ (MetaPrompt,     │  │  (Pipeline timing,  │ │   │
+│                     │  │  Fast Metrics)   │  │   Per-agent spans)  │ │   │
+│                     │  └──────────────────┘  └─────────────────────┘ │   │
+│                     └─────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+                        ┌───────────────────────┐
+                        │   Comet.com / Opik     │
+                        │   Dashboard            │
+                        │   - Trace Timeline     │
+                        │   - Experiments         │
+                        │   - Optimization Runs   │
+                        │   - Online Eval Rules   │
+                        │   - Cost Analysis       │
+                        └───────────────────────┘
+```
+
+---
+
+## 8. Experiment Results
+
+### Plan Quality Experiment (`plan-builtin-metrics-v2`)
+
+12 samples evaluated through the full 6-agent pipeline:
+
+| Metric | Score | Interpretation |
+|--------|-------|----------------|
+| `plan_structure_completeness` | **1.0000** | All structural fields present in every plan |
+| `g_eval_metric` | **0.9833** | LLM judge rates plans as excellent |
+| `answer_relevance_metric` | **0.9758** | Plans directly address user requests |
+| `task_count_reasonableness` | **0.9075** | Task counts match expected ranges |
+| `duration_realism` | **0.8901** | Realistic time estimates |
+| `hallucination_metric` | **0.7125** | Some introduced context (expected for plans) |
+| `plan_quality_llm_judge` | **0.5892** | Conservative holistic judge |
+| `is_json_metric` | **1.0000** | All outputs are valid JSON |
+| `moderation_metric` | **0.0000** | All content is safe (lower = better) |
+
+### Analyst Experiment (`analyst-builtin-metrics-v2`)
+
+12 samples evaluated for clarification quality:
+
+| Metric | Score |
+|--------|-------|
+| `clarification_quality` | **0.6375** |
+| `answer_relevance_metric` | **0.6875** |
+| `is_json_metric` | **1.0000** |
+| `moderation_metric` | **0.0000** |
+
+### Optimizer Baseline
+
+| Agent | Baseline Score | Status |
+|-------|---------------|--------|
+| Analyst | **0.9167** | Optimization complete |
+
+---
+
+## 9. Running Evaluations
+
+### Prerequisites
+
 ```bash
 cd backend
-pip install -e .
-python run.py
+
+# Required environment variables
+export GOOGLE_API_KEY=your_google_api_key    # For Gemini models
+export OPIK_API_KEY=your_opik_api_key        # For Opik
+export OPIK_WORKSPACE=your_workspace_name
 ```
 
-### 4. View Dashboard
-Navigate to:
-```
-https://www.comet.com/opik/{your_workspace}/kanso-ai/traces
-```
+### Commands
 
----
+```bash
+# Seed the benchmark dataset (idempotent, run once)
+uv run python run_evaluation.py --seed
 
-## 📈 Hackathon Criteria Alignment
+# Run analyst experiment (clarification quality)
+uv run python run_evaluation.py --experiment analyst --name "my-analyst-test"
 
-| Criteria | Implementation |
-|----------|----------------|
-| **Functionality** | ✅ Multi-agent system with 6 specialized agents |
-| **Real-world relevance** | ✅ Project planning tool for developers and teams |
-| **Use of LLMs/Agents** | ✅ Google ADK with Gemini models, tool use (search) |
-| **Evaluation & Observability** | ✅ Full Opik integration with LLM-as-judge |
-| **Goal Alignment** | ✅ Traces, evaluations, feedback loop, dashboards |
+# Run plan experiment (full pipeline, ~6 min for 12 samples)
+uv run python run_evaluation.py --experiment plan --name "my-plan-test"
 
----
+# Set up online evaluation rules (one-time)
+uv run python setup_online_rules.py
 
-## 🔗 Key Files
+# Run prompt optimization
+uv run python optimize_prompts.py --agent analyst --trials 3 --samples 4
+uv run python optimize_prompts.py --agent architect --trials 3 --samples 6
 
-| File | Purpose |
-|------|---------|
-| `app/opik_service.py` | Opik configuration, tracing decorators, callbacks, custom metrics |
-| `app/agents/orchestrator.py` | Agent pipeline with @track decorators and flush_traces() |
-| `app/main.py` | API endpoints including feedback, lifecycle trace flushing |
-| `app/config.py` | Environment configuration |
-
-### opik_service.py Functions
-
-```python
-# Configuration
-configure_opik()           # Initialize Opik with credentials
-flush_traces()             # Flush pending traces to Opik
-is_opik_enabled()          # Check if Opik is available
-
-# Tracing Decorators
-track_agent_run(agent_name)  # Decorator for agent functions
-track_tool_call(tool_name)   # Decorator for tool functions
-
-# Callbacks
-opik_before_agent_callback(agent_name, context)  # Pre-agent callback
-opik_after_agent_callback(agent_name, result)    # Post-agent callback
-
-# ADK Integration
-create_adk_tracer(name, tags, metadata)  # Create OpikTracer
-instrument_agent(agent, tracer)          # Instrument ADK agent
-
-# Feedback & URLs
-log_feedback(trace_id, score, category, comment)
-log_agent_feedback(trace_id, score, feedback_type, comment)
-get_trace_url(trace_id)
-get_dashboard_url()
+# Dry-run optimizer (no API calls)
+uv run python optimize_prompts.py --agent analyst --dry-run
 ```
 
 ---
 
-## 📝 Notes for Judges
+## 10. Key Files
 
-1. **Traces are available in real-time** - Generate a plan and see it appear in the dashboard immediately
+| File | Lines | Purpose |
+|------|-------|---------|
+| [`app/opik_service.py`](backend/app/opik_service.py) | ~925 | Core Opik integration: tracing, ADK tracer, dataset management, experiment runner |
+| [`app/evaluation.py`](backend/app/evaluation.py) | ~903 | Evaluation framework: benchmark dataset, 5 custom metrics, 5 built-in metrics, experiment task functions |
+| [`app/agents/orchestrator.py`](backend/app/agents/orchestrator.py) | ~893 | Agent pipeline with rich Opik trace metadata (timing, iterations, spans) |
+| [`run_evaluation.py`](backend/run_evaluation.py) | ~179 | CLI entry point: seed datasets, run experiments |
+| [`setup_online_rules.py`](backend/setup_online_rules.py) | ~280 | Opik REST API: automated LLM-as-judge evaluation rules |
+| [`optimize_prompts.py`](backend/optimize_prompts.py) | ~450 | Opik Agent Optimizer: MetaPromptOptimizer with fast heuristic metrics |
 
-2. **LLM-as-judge evaluations run automatically** - No manual intervention needed
+---
 
-3. **Feedback loop is functional** - Rate any plan and see it reflected in trace metadata
+## Hackathon Alignment: "Best Use of Opik"
 
-4. **Cost tracking is built-in** - Token usage and estimated costs per request
+| Opik Feature | Implementation | Depth |
+|-------------|----------------|-------|
+| **Tracing** | Full ADK pipeline tracing with OpikTracer, recursive agent instrumentation | ⭐⭐⭐ |
+| **Datasets** | Curated 12-item benchmark with expected_traits, difficulty, tags | ⭐⭐⭐ |
+| **Experiments** | Two experiment types (analyst + plan) with named runs, reproducible | ⭐⭐⭐ |
+| **Built-in Metrics** | Hallucination, AnswerRelevance, Moderation, GEval, IsJson — all via Gemini | ⭐⭐⭐ |
+| **Custom Metrics** | 5 domain-specific metrics (heuristic + LLM-as-judge) | ⭐⭐⭐ |
+| **Online Eval Rules** | 4 automated rules via REST API with 100% sampling | ⭐⭐⭐ |
+| **Agent Optimizer** | MetaPromptOptimizer for analyst + architect prompts with fast metrics | ⭐⭐⭐ |
+| **Rich Metadata** | Pipeline timing, iteration counts, per-agent spans, complexity distribution | ⭐⭐⭐ |
+| **Cost Tracking** | Token usage per agent via OpikTracer | ⭐⭐ |
 
-5. **Pattern consistency** - Follows same patterns as [commit-coach](https://github.com/Praveen2795/commit-coach) for production-ready observability
+---
 
-Feel free to explore the Opik dashboard to see the full observability capabilities in action!
+*Built for the [Commit To Change: An AI Agents Hackathon](https://www.encodeclub.com/programmes/comet-resolution-v2-hackathon) by Encode Club × Comet.*

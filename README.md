@@ -302,6 +302,9 @@ kanso-ai/
 │   ├── pyproject.toml                  # Python project config & dependencies (uv/pip compatible)
 │   ├── .env.example                    # Template for environment variables
 │   ├── README.md                       # Backend-specific docs (Opik setup, API details)
+│   ├── run_evaluation.py               # CLI: seed datasets & run Opik experiments
+│   ├── optimize_prompts.py             # Opik Agent Optimizer (MetaPromptOptimizer)
+│   ├── setup_online_rules.py           # Sets up 4 automated Opik online eval rules via REST API
 │   └── app/
 │       ├── __init__.py
 │       ├── config.py                   # Pydantic Settings — loads .env, defines all config
@@ -322,8 +325,10 @@ kanso-ai/
 │           ├── scheduler.py            # Deterministic scheduler — topological sort for startOffset
 │           ├── output_schemas.py       # Pydantic output schemas for agent responses (with field_validators)
 │           ├── tools.py                # Shared tools: get_current_date(), google_search
-│           └── opik_service.py         # Opik integration: tracing, LLM-as-judge eval, cost tracking
+│           ├── opik_service.py         # Opik integration: tracing, LLM-as-judge eval, cost tracking
+│           └── evaluation.py           # Evaluation framework: benchmark dataset, 9 metrics, experiment runners
 │
+├── OPIK_INTEGRATION.md                 # Deep-dive: Opik integration docs (datasets, metrics, optimizer, rules)
 └── .gitignore                          # Ignores: .env, node_modules, __pycache__, .venv, venv, dist
 ```
 
@@ -595,25 +600,35 @@ Key `field_validators` (prevent LLM null values from breaking the pipeline):
 
 ---
 
-## 🔭 Observability with Opik
+## 🔭 Observability & Evaluation with Opik
 
-Kanso.AI optionally integrates with **[Opik](https://github.com/comet-ml/opik)** by Comet for AI observability.
+Kanso.AI deeply integrates **[Opik](https://github.com/comet-ml/opik)** by Comet across the entire pipeline — tracing, evaluation, prompt optimization, and continuous quality monitoring.
 
-### What You Get
+> 📄 **Full details**: [OPIK_INTEGRATION.md](OPIK_INTEGRATION.md) — comprehensive documentation with architecture, metric tables, experiment results, and commands.
 
-- **Full Trace Visibility** — Track every LLM call across all agents in the pipeline
-- **LLM-as-Judge Evaluations** — Automatic quality scoring:
-  - Structure Quality (dependencies, granularity, organization)
-  - Estimate Reasonableness (realistic durations, appropriate buffers)
-  - Plan Completeness (requirement coverage, missing tasks)
-- **Cost & Token Tracking** — Monitor API usage and costs per agent
-- **Performance Metrics** — Latency per agent with detailed timing
+### Integration Highlights
 
-### Setup
+| Feature | Description |
+|---------|-------------|
+| **Full-Pipeline Tracing** | Every LLM call, tool use, and agent span traced via `OpikTracer` (ADK integration) |
+| **Datasets & Experiments** | Curated 12-item benchmark dataset with reproducible, named experiment runs |
+| **9 Evaluation Metrics** | 5 custom heuristic + 4 Opik built-in LLM-as-judge (`Hallucination`, `AnswerRelevance`, `Moderation`, `GEval`, `IsJson`) |
+| **Online Evaluation Rules** | 4 automated rules (via REST API) evaluate every production trace in real-time |
+| **Agent Optimizer** | `MetaPromptOptimizer` from `opik-optimizer` SDK to iteratively improve analyst & architect prompts |
+| **Rich Trace Metadata** | Pipeline timing, per-agent spans, iteration counts, complexity distribution, validation status |
+
+### Key Results
+
+| Experiment | Top Metrics |
+|------------|------------|
+| **Plan Quality** (full pipeline) | Structure: **1.0**, GEval: **0.98**, Relevance: **0.98**, TaskCount: **0.91** |
+| **Analyst** (clarification) | Clarification: **0.64**, Relevance: **0.69**, JSON: **1.0** |
+| **Optimizer Baseline** | Analyst: **0.92** |
+
+### Quick Setup
 
 1. Create a free [Comet account](https://www.comet.com/signup)
-2. Get your API credentials from the Opik settings page
-3. Add to `backend/.env`:
+2. Add to `backend/.env`:
 
 ```env
 OPIK_API_KEY=your_opik_api_key_here
@@ -621,7 +636,15 @@ OPIK_WORKSPACE=your_workspace_name
 OPIK_PROJECT_NAME=kanso-ai
 ```
 
-4. View traces at: `https://www.comet.com/opik/{OPIK_WORKSPACE}/kanso-ai/traces`
+3. Run evaluations:
+
+```bash
+cd backend
+uv run python run_evaluation.py --seed                             # Seed benchmark dataset
+uv run python run_evaluation.py --experiment plan --name "plan-v1"  # Run plan experiment
+uv run python setup_online_rules.py                                # Set up online eval rules
+uv run python optimize_prompts.py --agent analyst --trials 3       # Run prompt optimizer
+```
 
 Opik is **completely optional** — if `OPIK_API_KEY` is not set, all tracing is silently skipped.
 
