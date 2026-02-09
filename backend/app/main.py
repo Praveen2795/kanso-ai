@@ -237,6 +237,125 @@ async def submit_feedback(request: FeedbackRequest):
     }
 
 
+# --- Evaluation & Experiment Endpoints ---
+
+class EvaluationRunRequest(BaseModel):
+    """Request model for triggering an evaluation experiment."""
+    experiment: str = "analyst"  # "plan", "analyst", or "all"
+    experiment_name: Optional[str] = None
+    dataset_name: Optional[str] = None
+
+
+@app.get("/api/evaluate/dataset")
+async def get_evaluation_dataset():
+    """
+    Get information about the benchmark evaluation dataset.
+    
+    Returns dataset metadata, item counts by difficulty/domain,
+    and a preview of evaluation items.
+    """
+    from .evaluation import get_benchmark_dataset_info, seed_benchmark_dataset
+    
+    info = get_benchmark_dataset_info()
+    
+    # Check if dataset exists in Opik
+    info["opik_enabled"] = settings.opik_enabled
+    info["dashboard_url"] = get_dashboard_url() if settings.opik_enabled else None
+    
+    return info
+
+
+@app.post("/api/evaluate/seed")
+async def seed_evaluation_dataset():
+    """
+    Seed the benchmark dataset in Opik.
+    
+    Creates or updates the evaluation dataset with curated
+    project planning requests for systematic evaluation.
+    """
+    if not settings.opik_enabled:
+        return {"status": "skipped", "message": "Opik not configured"}
+    
+    from .evaluation import seed_benchmark_dataset, get_benchmark_dataset_info
+    
+    success = seed_benchmark_dataset()
+    
+    if success:
+        info = get_benchmark_dataset_info()
+        return {
+            "status": "seeded",
+            "dataset": info["name"],
+            "items_count": info["total_items"],
+            "dashboard_url": get_dashboard_url(),
+        }
+    else:
+        raise HTTPException(status_code=500, detail="Failed to seed dataset")
+
+
+@app.post("/api/evaluate/run")
+async def run_evaluation_experiment(request: EvaluationRunRequest):
+    """
+    Trigger an Opik evaluation experiment.
+    
+    Runs the specified experiment type against the benchmark dataset.
+    Results are logged to Opik and visible in the dashboard.
+    
+    WARNING: The 'plan' experiment runs the full 6-agent pipeline
+    for each dataset item and can take 10-15 minutes.
+    """
+    if not settings.opik_enabled:
+        return {"status": "skipped", "message": "Opik not configured"}
+    
+    from .evaluation import (
+        seed_benchmark_dataset,
+        run_plan_quality_experiment,
+        run_analyst_experiment,
+    )
+    
+    # Ensure dataset is seeded
+    seed_benchmark_dataset()
+    
+    results = {}
+    
+    if request.experiment in ("analyst", "all"):
+        logger.info("Starting analyst evaluation experiment via API")
+        exp_name = (
+            f"analyst-{request.experiment_name}" if request.experiment_name
+            else None
+        )
+        result = run_analyst_experiment(
+            experiment_name=exp_name,
+            dataset_name=request.dataset_name,
+        )
+        results["analyst"] = {
+            "status": "completed" if result else "failed",
+            "experiment_name": exp_name or "auto-generated",
+        }
+    
+    if request.experiment in ("plan", "all"):
+        logger.info("Starting plan quality evaluation experiment via API")
+        exp_name = (
+            f"plan-{request.experiment_name}" if request.experiment_name
+            else None
+        )
+        result = run_plan_quality_experiment(
+            experiment_name=exp_name,
+            dataset_name=request.dataset_name,
+        )
+        results["plan"] = {
+            "status": "completed" if result else "failed",
+            "experiment_name": exp_name or "auto-generated",
+        }
+    
+    flush_traces()
+    
+    return {
+        "status": "completed",
+        "experiments": results,
+        "dashboard_url": get_dashboard_url(),
+    }
+
+
 @app.post("/api/analyze", response_model=AnalysisResponse)
 async def analyze_project_request(request: AnalyzeRequest):
     """

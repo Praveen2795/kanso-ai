@@ -784,6 +784,141 @@ def is_opik_enabled() -> bool:
     return _opik_available and settings.opik_enabled
 
 
+# ============================================================================
+# Dataset & Experiment Management
+# ============================================================================
+
+def get_or_create_dataset(
+    name: str,
+    description: str = ""
+) -> Optional[Any]:
+    """
+    Get or create an Opik dataset for evaluation.
+    
+    Args:
+        name: Dataset name
+        description: Dataset description
+        
+    Returns:
+        Opik Dataset object or None
+    """
+    if not _opik_available or not settings.opik_enabled or not _opik_client:
+        logger.warning("Opik not available for dataset creation")
+        return None
+    
+    try:
+        dataset = _opik_client.get_or_create_dataset(
+            name=name,
+            description=description
+        )
+        logger.info(f"Dataset ready: {name}")
+        return dataset
+    except Exception as e:
+        logger.error(f"Failed to get/create dataset '{name}': {e}")
+        return None
+
+
+def seed_dataset(
+    dataset_name: str,
+    items: List[Dict[str, Any]],
+    description: str = ""
+) -> Optional[Any]:
+    """
+    Seed an Opik dataset with evaluation items.
+    
+    Each item should have at minimum:
+      - input: the project description / prompt
+      - expected_output: expected traits or reference data
+    
+    Args:
+        dataset_name: Name for the dataset
+        items: List of dicts with evaluation data
+        description: Dataset description
+        
+    Returns:
+        Opik Dataset object or None
+    """
+    dataset = get_or_create_dataset(dataset_name, description)
+    if dataset is None:
+        return None
+    
+    try:
+        dataset.insert(items)
+        logger.info(f"Seeded dataset '{dataset_name}' with {len(items)} items")
+        return dataset
+    except Exception as e:
+        logger.error(f"Failed to seed dataset '{dataset_name}': {e}")
+        return None
+
+
+def run_evaluation(
+    dataset_name: str,
+    task_fn,
+    scoring_metrics: List[Any],
+    experiment_name: str = "kanso-eval",
+    experiment_metadata: Optional[Dict[str, Any]] = None
+) -> Optional[Any]:
+    """
+    Run an Opik evaluation experiment against a dataset.
+    
+    This is the core evaluation runner that:
+    1. Loads the named dataset
+    2. Runs the task function on each dataset item
+    3. Scores results with the provided metrics
+    4. Logs everything to Opik as an Experiment
+    
+    Args:
+        dataset_name: Name of the Opik dataset to evaluate against
+        task_fn: Callable that takes a dataset item dict and returns an output dict
+        scoring_metrics: List of Opik metric instances
+        experiment_name: Name for the experiment run
+        experiment_metadata: Optional metadata dict
+        
+    Returns:
+        EvaluationResult object or None
+    """
+    if not _opik_available or not settings.opik_enabled or not _opik_client:
+        logger.warning("Opik not available for evaluation")
+        return None
+    
+    try:
+        from opik.evaluation import evaluate
+        
+        dataset = _opik_client.get_or_create_dataset(name=dataset_name)
+        
+        metadata = {
+            "project": "kanso-ai",
+            "environment": settings.environment,
+            "model": settings.default_model,
+            "pro_model": settings.pro_model,
+            **(experiment_metadata or {})
+        }
+        
+        logger.info(
+            f"Starting experiment '{experiment_name}' on dataset '{dataset_name}'",
+            extra={'extra_data': {
+                'metrics_count': len(scoring_metrics),
+                'metric_names': [getattr(m, 'name', type(m).__name__) for m in scoring_metrics]
+            }}
+        )
+        
+        result = evaluate(
+            experiment_name=experiment_name,
+            dataset=dataset,
+            task=task_fn,
+            scoring_metrics=scoring_metrics,
+            experiment_config=metadata,
+            project_name=settings.opik_project_name,
+        )
+        
+        logger.info(f"Experiment '{experiment_name}' complete")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Evaluation experiment failed: {e}", exc_info=True)
+        return None
+
+
 # Initialize Opik on module load if configured
 if settings.opik_enabled:
     configure_opik()
