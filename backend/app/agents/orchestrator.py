@@ -171,6 +171,21 @@ async def run_agent_with_status(
         # Calculate execution time
         execution_time_ms = (time.time() - start_time) * 1000
         
+        # Enrich current span with per-agent performance metadata
+        if OPIK_AVAILABLE:
+            try:
+                opik_context.update_current_span(
+                    metadata={
+                        "agent_name": agent_name,
+                        "agent_type": agent_type.value,
+                        "execution_time_ms": round(execution_time_ms, 1),
+                        "response_length": len(result_text),
+                        "model": settings.default_model,
+                    }
+                )
+            except Exception:
+                pass
+        
         # Parse JSON response
         try:
             parsed = json.loads(result_text) if result_text else {}
@@ -248,13 +263,14 @@ async def analyze_request(
     Returns:
         Dict with needsClarification, questions, and reasoning
     """
+    start_time = time.time()
     history_context = json.dumps(chat_history or [])
     prompt = f"""User Topic: "{topic}"
 Previous Context: {history_context}
 
 Analyze this project request and determine if clarification is needed."""
 
-    return await run_agent_with_status(
+    result = await run_agent_with_status(
         agent=analyst_agent,
         user_message=prompt,
         status_callback=status_callback,
@@ -262,6 +278,26 @@ Analyze this project request and determine if clarification is needed."""
         status_message="Analyzing project scope and identifying gaps...",
         trace_metadata={"topic_length": len(topic)}
     )
+
+    # Enrich trace with analyst-specific metadata
+    if OPIK_AVAILABLE:
+        try:
+            opik_context.update_current_trace(
+                metadata={
+                    "model": settings.default_model,
+                    "pipeline_stage": "analyst",
+                    "topic_length": len(topic),
+                    "has_chat_history": bool(chat_history),
+                    "history_length": len(chat_history) if chat_history else 0,
+                    "needs_clarification": result.get("needsClarification", False),
+                    "question_count": len(result.get("questions", [])),
+                    "elapsed_seconds": round(time.time() - start_time, 2),
+                }
+            )
+        except Exception:
+            pass
+
+    return result
 
 
 async def check_file_relevance(
@@ -315,8 +351,28 @@ async def generate_project_plan(
     Returns:
         Complete ProjectData with scheduled tasks
     """
+    pipeline_start = time.time()
+    stage_timings = {}  # Track per-stage timing
     augmented_context = context
     file_to_use = file
+
+    # Record initial pipeline metadata
+    if OPIK_AVAILABLE:
+        try:
+            opik_context.update_current_trace(
+                metadata={
+                    "pipeline": "full",
+                    "agents": ["researcher", "architect", "reviewer", "estimator", "manager"],
+                    "pro_model": settings.pro_model,
+                    "default_model": settings.default_model,
+                    "topic_length": len(topic),
+                    "context_length": len(context),
+                    "has_file": file is not None,
+                    "max_validation_iterations": MAX_VALIDATION_ITERATIONS,
+                }
+            )
+        except Exception:
+            pass
     
     # Step 0a: Research URLs if any are found in topic or context
     combined_text = f"{topic} {context}"
@@ -413,6 +469,7 @@ async def generate_project_plan(
             augmented_context += f"\n[System Note: User uploaded file '{file.name}' but it was deemed irrelevant. Reason: {relevance.get('reason', 'Unknown')}]"
     
     # Step 1: Architecture Loop (Architect + Structure Reviewer) with max iterations
+    arch_stage_start = time.time()
     file_note = f"\n**User uploaded file: {file_to_use.name}. Use this as primary context.**" if file_to_use else ""
     
     architect_prompt = f"""Create a project plan for: "{topic}"
@@ -469,7 +526,10 @@ User Context: "{augmented_context}"
     if not structure_valid:
         logger.warning(f"Structure validation exhausted max iterations ({MAX_VALIDATION_ITERATIONS}), proceeding anyway")
     
+    stage_timings["architecture"] = round(time.time() - arch_stage_start, 2)
+
     # Step 2: Estimation Loop (Estimator + Estimate Reviewer) with max iterations
+    est_stage_start = time.time()
     estimated_plan = None
     estimate_valid = False
     estimate_critique = None
@@ -520,7 +580,10 @@ User Context: "{augmented_context}"
     if not estimate_valid:
         logger.warning(f"Estimate validation exhausted max iterations ({MAX_VALIDATION_ITERATIONS}), proceeding anyway")
     
+    stage_timings["estimation"] = round(time.time() - est_stage_start, 2)
+
     # Step 3: Final cleanup
+    finalize_start = time.time()
     refined_plan = await run_agent_with_status(
         agent=final_reviewer,
         user_message=f"Clean up and finalize this plan:\n{json.dumps(estimated_plan)}",
@@ -562,15 +625,28 @@ User Context: "{augmented_context}"
                 }}
             )
             
-            # Update current trace with evaluation metadata
+            # Update current trace with comprehensive pipeline metadata
             if OPIK_AVAILABLE:
                 try:
+                    stage_timings["finalize"] = round(time.time() - finalize_start, 2)
+                    total_elapsed = round(time.time() - pipeline_start, 2)
                     opik_context.update_current_trace(
                         metadata={
                             "evaluation": evaluation_results,
                             "task_count": len(scheduled_tasks),
                             "total_duration_hours": total_duration,
-                            "phases": list(set(t.phase for t in scheduled_tasks))
+                            "phases": list(set(t.phase for t in scheduled_tasks)),
+                            "pipeline_elapsed_seconds": total_elapsed,
+                            "stage_timings": stage_timings,
+                            "architecture_iterations": iteration if structure_valid else MAX_VALIDATION_ITERATIONS,
+                            "estimation_iterations": iteration if estimate_valid else MAX_VALIDATION_ITERATIONS,
+                            "structure_validated": structure_valid,
+                            "estimates_validated": estimate_valid,
+                            "has_research_context": len(augmented_context) > len(context),
+                            "complexity_distribution": {
+                                level.value: sum(1 for t in scheduled_tasks if t.complexity == level)
+                                for level in ComplexityLevel
+                            },
                         }
                     )
                 except Exception as e:
@@ -758,6 +834,7 @@ async def chat_with_manager(
     Returns:
         Dict with 'reply' and optional 'updatedPlan'
     """
+    chat_start = time.time()
     # Convert project to JSON for agent context
     project_json = project.model_dump_json()
     
@@ -784,7 +861,25 @@ Respond to this message. If the user wants to modify the plan, return an updated
         agent_type=AgentType.MANAGER,
         status_message="Processing your request and refining the project structure..."
     )
-    
+
+    # Enrich trace with chat interaction metadata
+    if OPIK_AVAILABLE:
+        try:
+            opik_context.update_current_trace(
+                metadata={
+                    "model": settings.default_model,
+                    "pipeline_stage": "manager_chat",
+                    "message_length": len(message),
+                    "history_turns": len(history),
+                    "project_task_count": len(project.tasks),
+                    "has_plan_update": bool(response.get("updatedPlan")),
+                    "reply_length": len(response.get("reply", "")),
+                    "elapsed_seconds": round(time.time() - chat_start, 2),
+                }
+            )
+        except Exception:
+            pass
+
     # If there's an updated plan, process it
     if response.get("updatedPlan"):
         updated_tasks_count = len(response["updatedPlan"].get("tasks", []))

@@ -147,8 +147,10 @@ def create_adk_tracer(
     default_metadata = {
         "environment": settings.environment,
         "model": settings.default_model,
+        "pro_model": settings.pro_model,
         "framework": "google-adk",
-        "app_version": "1.0.0"
+        "app_version": "1.0.0",
+        "judge_model": "gemini/gemini-2.5-flash",
     }
     
     return OpikTracer(
