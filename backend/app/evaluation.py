@@ -31,6 +31,9 @@ from typing import Any, Dict, List, Optional
 from opik.evaluation.metrics import base_metric
 from opik.evaluation.metrics.score_result import ScoreResult
 
+# Opik built-in LLM-as-judge metrics (via LiteLLM → Gemini)
+from opik.evaluation.metrics import Hallucination, AnswerRelevance, Moderation, GEval, IsJson
+
 from .config import get_settings
 from .logging_config import get_logger
 from .opik_service import (
@@ -42,6 +45,9 @@ from .opik_service import (
 
 logger = get_logger(__name__)
 settings = get_settings()
+
+# Model used by Opik's built-in LLM-as-judge metrics (via LiteLLM)
+JUDGE_MODEL = "gemini/gemini-2.5-flash"
 
 
 def _parse_llm_json(text: str) -> dict:
@@ -750,12 +756,31 @@ def run_plan_quality_experiment(
     name = experiment_name or f"plan-quality-{settings.pro_model}-{int(time.time())}"
     ds_name = dataset_name or BENCHMARK_DATASET_NAME
     
-    # Metrics: 3 heuristic + 1 LLM-as-judge
+    # Metrics: 3 heuristic + 1 custom LLM-judge + 5 Opik built-in metrics
     metrics = [
+        # --- Custom heuristic metrics ---
         TaskCountReasonableness(),
         PlanHasRequiredFields(),
         DurationRealism(),
+        # --- Custom LLM-as-judge ---
         PlanQualityLLMJudge(),
+        # --- Opik built-in LLM-as-judge metrics (via LiteLLM → Gemini) ---
+        Hallucination(model=JUDGE_MODEL),
+        AnswerRelevance(model=JUDGE_MODEL, require_context=False),
+        Moderation(model=JUDGE_MODEL),
+        IsJson(),
+        GEval(
+            model=JUDGE_MODEL,
+            task_introduction="You are evaluating an AI-generated software project plan.",
+            evaluation_criteria=(
+                "The plan should: "
+                "1) Break the project into logical, actionable tasks. "
+                "2) Have realistic time estimates for each task. "
+                "3) Identify relevant technology choices. "
+                "4) Cover all aspects of the original request. "
+                "5) Be structured as valid JSON with clear field names."
+            ),
+        ),
     ]
     
     task_fn = create_plan_generation_task()
@@ -772,6 +797,7 @@ def run_plan_quality_experiment(
             "pipeline": "full",
             "agents": ["analyst", "researcher", "architect", "reviewer", "estimator", "manager"],
             "metrics": [m.name for m in metrics],
+            "judge_model": JUDGE_MODEL,
         }
     )
     
@@ -807,8 +833,14 @@ def run_analyst_experiment(
     name = experiment_name or f"analyst-quality-{settings.pro_model}-{int(time.time())}"
     ds_name = dataset_name or BENCHMARK_DATASET_NAME
     
+    # Metrics: 1 custom LLM-judge + 3 Opik built-in metrics
     metrics = [
+        # --- Custom LLM-as-judge ---
         ClarificationQualityJudge(),
+        # --- Opik built-in LLM-as-judge metrics (via LiteLLM → Gemini) ---
+        AnswerRelevance(model=JUDGE_MODEL, require_context=False),
+        Moderation(model=JUDGE_MODEL),
+        IsJson(),
     ]
     
     task_fn = create_analyst_task()
@@ -825,6 +857,7 @@ def run_analyst_experiment(
             "pipeline": "analyst_only",
             "agents": ["analyst"],
             "metrics": [m.name for m in metrics],
+            "judge_model": JUDGE_MODEL,
         }
     )
     

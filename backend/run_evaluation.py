@@ -122,10 +122,7 @@ Examples:
         print("🔬 Experiment: Analyst Clarification Quality")
         print("=" * 60)
         
-        exp_name = (
-            f"analyst-{args.name}" if args.name
-            else None  # auto-generated
-        )
+        exp_name = args.name or None  # auto-generated if not provided
         
         start = time.time()
         print("   Running analyst agent on each dataset item...")
@@ -149,10 +146,7 @@ Examples:
         print("🔬 Experiment: Full Pipeline Plan Quality")
         print("=" * 60)
         
-        exp_name = (
-            f"plan-{args.name}" if args.name
-            else None  # auto-generated
-        )
+        exp_name = args.name or None  # auto-generated if not provided
         
         start = time.time()
         print("   Running full multi-agent pipeline on each dataset item...")
