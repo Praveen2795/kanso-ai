@@ -16,6 +16,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "websockets>=13.0",
     "opik>=1.0.0",
+    "opik-optimizer>=3.0.1",
 ]
 
 [project.optional-dependencies]
