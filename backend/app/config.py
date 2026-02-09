@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     # API Keys
     google_api_key: str = ""
     
+    # Opik Observability
+    opik_api_key: str = ""
+    opik_workspace: str = ""
+    opik_project_name: str = "kanso-ai"
+    
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
@@ -47,6 +52,11 @@ class Settings(BaseSettings):
     @property
     def is_development(self) -> bool:
         return self.environment == "development"
+    
+    @property
+    def opik_enabled(self) -> bool:
+        """Check if Opik observability is configured."""
+        return bool(self.opik_api_key and self.opik_workspace)
 
     class Config:
         env_file = ".env"

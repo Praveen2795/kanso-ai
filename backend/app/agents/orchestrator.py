@@ -1,10 +1,12 @@
 """
 Orchestrator - Coordinates the multi-agent workflow for project plan generation.
 Implements the agent pipeline with validation loops.
+Integrated with Opik for comprehensive observability and evaluation.
 """
 
 import json
 import os
+import time
 from typing import AsyncGenerator, Callable, Any
 
 from google.adk.runners import Runner
@@ -18,6 +20,30 @@ from ..models import (
 from ..config import get_settings
 from ..logging_config import get_logger, log_execution_time
 
+# Import Opik observability
+from ..opik_service import (
+    create_adk_tracer,
+    instrument_agent,
+    evaluate_plan_quality,
+    track_agent_performance,
+    track_agent_run,
+    flush_traces,
+    configure_opik,
+    is_opik_enabled,
+    get_dashboard_url,
+)
+
+# Try to import Opik for tracing decorators
+try:
+    from opik import track, opik_context
+    OPIK_AVAILABLE = True
+except ImportError:
+    OPIK_AVAILABLE = False
+    def track(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator if not args or callable(args[0]) else decorator
+
 # Ensure GOOGLE_API_KEY is set in environment for ADK
 settings = get_settings()
 if settings.google_api_key:
@@ -27,9 +53,13 @@ else:
 from .analyst import analyst_agent, file_validator_agent
 from .architect import create_architect_agent
 from .estimator import create_estimator_agent
-from .reviewer import structure_reviewer, estimate_reviewer, final_reviewer
+from .reviewer import (
+    structure_reviewer, estimate_reviewer, final_reviewer,
+    MAX_VALIDATION_ITERATIONS
+)
 from .manager import create_manager_agent
 from .scheduler import recalculate_schedule, calculate_total_duration
+from .research import research_urls, extract_urls, auto_research_context
 
 
 # Setup logging using centralized config
@@ -38,16 +68,23 @@ logger = get_logger(__name__)
 # Session service for ADK runners
 session_service = InMemorySessionService()
 
+# Initialize Opik on module load
+if settings.opik_enabled:
+    configure_opik()
+    logger.info("Opik observability initialized for orchestrator")
+
 
 async def run_agent_with_status(
     agent,
     user_message: str,
     status_callback: Callable[[AgentStatusUpdate], Any] | None = None,
     agent_type: AgentType = AgentType.ANALYST,
-    status_message: str = "Processing..."
+    status_message: str = "Processing...",
+    trace_metadata: dict | None = None
 ) -> dict:
     """
     Run an ADK agent and optionally send status updates.
+    Integrated with Opik for tracing and performance monitoring.
     
     Args:
         agent: The LlmAgent to run
@@ -55,13 +92,17 @@ async def run_agent_with_status(
         status_callback: Optional callback for status updates
         agent_type: Type of agent for status reporting
         status_message: Message to show during processing
+        trace_metadata: Optional metadata to add to Opik trace
         
     Returns:
         Parsed JSON response from the agent
     """
+    start_time = time.time()
+    agent_name = getattr(agent, 'name', 'unknown')
+    
     logger.info(
-        f"Running agent: {agent.name}",
-        extra={'extra_data': {'agent': agent.name, 'message_length': len(user_message)}}
+        f"Running agent: {agent_name}",
+        extra={'extra_data': {'agent': agent_name, 'message_length': len(user_message)}}
     )
     
     if status_callback:
@@ -72,9 +113,24 @@ async def run_agent_with_status(
         ))
     
     try:
+        # Instrument agent with Opik tracer if available
+        if settings.opik_enabled and OPIK_AVAILABLE:
+            tracer = create_adk_tracer(
+                name=f"kanso-{agent_name}",
+                tags=[agent_type.value, "orchestrator"],
+                metadata={
+                    "agent_type": agent_type.value,
+                    "status_message": status_message,
+                    **(trace_metadata or {})
+                }
+            )
+            instrumented_agent = instrument_agent(agent, tracer)
+        else:
+            instrumented_agent = agent
+        
         # Create a runner for this agent
         runner = Runner(
-            agent=agent,
+            agent=instrumented_agent,
             app_name="kanso_ai",
             session_service=session_service
         )
@@ -111,6 +167,9 @@ async def run_agent_with_status(
                         if hasattr(part, 'text') and part.text:
                             result_text = part.text
                             logger.debug(f"Got response", extra={'extra_data': {'response_length': len(result_text)}})
+        
+        # Calculate execution time
+        execution_time_ms = (time.time() - start_time) * 1000
         
         # Parse JSON response
         try:
@@ -172,6 +231,12 @@ def parse_tasks_from_plan(plan_data: dict) -> list[Task]:
     return tasks
 
 
+@track(
+    name="analyze_project_request",
+    tags=["analyst", "clarification"],
+    capture_input=True,
+    capture_output=True
+)
 async def analyze_request(
     topic: str,
     chat_history: list[str] = None,
@@ -194,7 +259,8 @@ Analyze this project request and determine if clarification is needed."""
         user_message=prompt,
         status_callback=status_callback,
         agent_type=AgentType.ANALYST,
-        status_message="Analyzing project scope and identifying gaps..."
+        status_message="Analyzing project scope and identifying gaps...",
+        trace_metadata={"topic_length": len(topic)}
     )
 
 
@@ -223,6 +289,12 @@ Determine if this file is relevant to the project topic."""
     )
 
 
+@track(
+    name="generate_project_plan",
+    tags=["orchestrator", "plan-generation", "multi-agent"],
+    capture_input=True,
+    capture_output=True
+)
 async def generate_project_plan(
     topic: str,
     context: str,
@@ -231,7 +303,8 @@ async def generate_project_plan(
 ) -> ProjectData:
     """
     Main orchestration function to generate a complete project plan.
-    Runs the full agent pipeline: Architect -> Reviewer -> Estimator -> Reviewer -> Final
+    Runs the full agent pipeline: Research -> Architect -> Reviewer -> Estimator -> Reviewer -> Final
+    Fully traced with Opik for observability and LLM-as-judge evaluation.
     
     Args:
         topic: The project topic/goal
@@ -245,83 +318,207 @@ async def generate_project_plan(
     augmented_context = context
     file_to_use = file
     
-    # Step 0: Check file relevance if provided
+    # Step 0a: Research URLs if any are found in topic or context
+    combined_text = f"{topic} {context}"
+    urls_found = extract_urls(combined_text)
+    
+    if urls_found:
+        if status_callback:
+            await status_callback(AgentStatusUpdate(
+                active=True,
+                agent=AgentType.RESEARCHER,
+                message=f"Researching {len(urls_found)} URL(s) using Google Search..."
+            ))
+        
+        research_result = await research_urls(combined_text)
+        
+        if research_result.get('success') and research_result.get('context_summary'):
+            augmented_context += f"\n\n{research_result['context_summary']}"
+            logger.info(
+                "Google Search research complete",
+                extra={'extra_data': {
+                    'urls_provided': len(research_result['urls_found']),
+                    'sources_found': len(research_result.get('sources', []))
+                }}
+            )
+            
+            # Report success with sources count
+            if status_callback:
+                source_count = len(research_result.get('sources', []))
+                await status_callback(AgentStatusUpdate(
+                    active=True,
+                    agent=AgentType.RESEARCHER,
+                    message=f"✓ URL research complete - found {source_count} relevant sources"
+                ))
+        
+        # Report any research errors
+        if not research_result.get('success') and status_callback:
+            error_msg = research_result.get('error', 'Unknown error')
+            await status_callback(AgentStatusUpdate(
+                active=True,
+                agent=AgentType.RESEARCHER,
+                message=f"⚠️ Research encountered an issue: {error_msg[:100]}"
+            ))
+    
+    # Step 0a.2: Auto-research unfamiliar terms from clarification answers
+    if context and len(context) > 20:
+        if status_callback:
+            await status_callback(AgentStatusUpdate(
+                active=True,
+                agent=AgentType.RESEARCHER,
+                message="Analyzing context for unfamiliar terms..."
+            ))
+        
+        auto_research_result = await auto_research_context(topic, context)
+        
+        if auto_research_result.get('terms_found'):
+            terms = auto_research_result['terms_found']
+            if status_callback:
+                await status_callback(AgentStatusUpdate(
+                    active=True,
+                    agent=AgentType.RESEARCHER,
+                    message=f"Researching terms: {', '.join(terms)}..."
+                ))
+            
+            if auto_research_result.get('success') and auto_research_result.get('context_summary'):
+                augmented_context += f"\n\n{auto_research_result['context_summary']}"
+                logger.info(
+                    "Auto-research of terms complete",
+                    extra={'extra_data': {
+                        'terms_researched': terms,
+                        'sources_found': len(auto_research_result.get('sources', []))
+                    }}
+                )
+                
+                if status_callback:
+                    source_count = len(auto_research_result.get('sources', []))
+                    await status_callback(AgentStatusUpdate(
+                        active=True,
+                        agent=AgentType.RESEARCHER,
+                        message=f"✓ Term research complete - researched {len(terms)} term(s), found {source_count} sources"
+                    ))
+            
+            if not auto_research_result.get('success') and status_callback:
+                await status_callback(AgentStatusUpdate(
+                    active=True,
+                    agent=AgentType.RESEARCHER,
+                    message="⚠️ Term research encountered an issue, continuing without"
+                ))
+    
+    # Step 0b: Check file relevance if provided
     if file:
         relevance = await check_file_relevance(topic, file, status_callback)
         if not relevance.get("isRelevant", True):
             file_to_use = None
             augmented_context += f"\n[System Note: User uploaded file '{file.name}' but it was deemed irrelevant. Reason: {relevance.get('reason', 'Unknown')}]"
     
-    # Step 1: Architect creates structure
-    architect = create_architect_agent()
+    # Step 1: Architecture Loop (Architect + Structure Reviewer) with max iterations
     file_note = f"\n**User uploaded file: {file_to_use.name}. Use this as primary context.**" if file_to_use else ""
     
     architect_prompt = f"""Create a project plan for: "{topic}"
 User Context: "{augmented_context}"
 {file_note}"""
 
-    structural_plan = await run_agent_with_status(
-        agent=architect,
-        user_message=architect_prompt,
-        status_callback=status_callback,
-        agent_type=AgentType.ARCHITECT,
-        status_message="Designing project structure (Phases, Tasks, Dependencies)..."
-    )
+    structural_plan = None
+    structure_valid = False
+    critique = None
     
-    # Step 1.5: Validate structure
-    structure_check = await run_agent_with_status(
-        agent=structure_reviewer,
-        user_message=f"Review this project structure:\n{json.dumps(structural_plan)}",
-        status_callback=status_callback,
-        agent_type=AgentType.REVIEWER,
-        status_message="Validating logical dependencies and structural completeness..."
-    )
-    
-    # Retry if invalid
-    if not structure_check.get("isValid", True):
-        critique = structure_check.get("critique", "Please improve the structure.")
-        architect_with_feedback = create_architect_agent(critique)
+    for iteration in range(1, MAX_VALIDATION_ITERATIONS + 1):
+        logger.info(f"Architecture iteration {iteration}/{MAX_VALIDATION_ITERATIONS}")
         
+        # Create architect (with critique if this is a retry)
+        architect = create_architect_agent(critique)
+        
+        # Run architect
         structural_plan = await run_agent_with_status(
-            agent=architect_with_feedback,
+            agent=architect,
             user_message=architect_prompt,
             status_callback=status_callback,
             agent_type=AgentType.ARCHITECT,
-            status_message=f"Re-designing structure based on feedback..."
+            status_message=f"Designing project structure (iteration {iteration}/{MAX_VALIDATION_ITERATIONS})...",
+            trace_metadata={"iteration": iteration, "has_critique": critique is not None}
         )
-    
-    # Step 2: Estimator calculates times
-    estimator = create_estimator_agent()
-    
-    estimated_plan = await run_agent_with_status(
-        agent=estimator,
-        user_message=f"Estimate times for this project structure:\n{json.dumps(structural_plan)}",
-        status_callback=status_callback,
-        agent_type=AgentType.ESTIMATOR,
-        status_message="Calculating bottom-up estimates for every subtask..."
-    )
-    
-    # Step 2.5: Validate estimates
-    estimate_check = await run_agent_with_status(
-        agent=estimate_reviewer,
-        user_message=f"Review these time estimates:\n{json.dumps(estimated_plan)}",
-        status_callback=status_callback,
-        agent_type=AgentType.REVIEWER,
-        status_message="Sanity checking time estimates and buffer allocations..."
-    )
-    
-    # Retry if invalid
-    if not estimate_check.get("isValid", True):
-        critique = estimate_check.get("critique", "Please improve the estimates.")
-        estimator_with_feedback = create_estimator_agent(critique)
         
+        # Validate structure
+        structure_check = await run_agent_with_status(
+            agent=structure_reviewer,
+            user_message=f"Review this project structure:\n{json.dumps(structural_plan)}",
+            status_callback=status_callback,
+            agent_type=AgentType.REVIEWER,
+            status_message=f"Validating structure (iteration {iteration}/{MAX_VALIDATION_ITERATIONS})...",
+            trace_metadata={"iteration": iteration}
+        )
+        
+        structure_valid = structure_check.get("isValid", True)
+        
+        if structure_valid:
+            logger.info(f"Structure validated on iteration {iteration}")
+            break
+        else:
+            critique = structure_check.get("critique", "Please improve the structure.")
+            logger.info(f"Structure rejected on iteration {iteration}, critique: {critique[:100]}...")
+            
+            if iteration < MAX_VALIDATION_ITERATIONS:
+                if status_callback:
+                    await status_callback(AgentStatusUpdate(
+                        active=True,
+                        agent=AgentType.ARCHITECT,
+                        message=f"Structure needs improvement, retrying ({iteration}/{MAX_VALIDATION_ITERATIONS})..."
+                    ))
+    
+    if not structure_valid:
+        logger.warning(f"Structure validation exhausted max iterations ({MAX_VALIDATION_ITERATIONS}), proceeding anyway")
+    
+    # Step 2: Estimation Loop (Estimator + Estimate Reviewer) with max iterations
+    estimated_plan = None
+    estimate_valid = False
+    estimate_critique = None
+    
+    for iteration in range(1, MAX_VALIDATION_ITERATIONS + 1):
+        logger.info(f"Estimation iteration {iteration}/{MAX_VALIDATION_ITERATIONS}")
+        
+        # Create estimator (with critique if this is a retry)
+        estimator = create_estimator_agent(estimate_critique)
+        
+        # Run estimator
         estimated_plan = await run_agent_with_status(
-            agent=estimator_with_feedback,
+            agent=estimator,
             user_message=f"Estimate times for this project structure:\n{json.dumps(structural_plan)}",
             status_callback=status_callback,
             agent_type=AgentType.ESTIMATOR,
-            status_message="Recalculating estimates based on feedback..."
+            status_message=f"Calculating time estimates (iteration {iteration}/{MAX_VALIDATION_ITERATIONS})...",
+            trace_metadata={"iteration": iteration, "has_critique": estimate_critique is not None}
         )
+        
+        # Validate estimates
+        estimate_check = await run_agent_with_status(
+            agent=estimate_reviewer,
+            user_message=f"Review these time estimates:\n{json.dumps(estimated_plan)}",
+            status_callback=status_callback,
+            agent_type=AgentType.REVIEWER,
+            status_message=f"Validating estimates (iteration {iteration}/{MAX_VALIDATION_ITERATIONS})...",
+            trace_metadata={"iteration": iteration}
+        )
+        
+        estimate_valid = estimate_check.get("isValid", True)
+        
+        if estimate_valid:
+            logger.info(f"Estimates validated on iteration {iteration}")
+            break
+        else:
+            estimate_critique = estimate_check.get("critique", "Please improve the estimates.")
+            logger.info(f"Estimates rejected on iteration {iteration}, critique: {estimate_critique[:100]}...")
+            
+            if iteration < MAX_VALIDATION_ITERATIONS:
+                if status_callback:
+                    await status_callback(AgentStatusUpdate(
+                        active=True,
+                        agent=AgentType.ESTIMATOR,
+                        message=f"Estimates need improvement, retrying ({iteration}/{MAX_VALIDATION_ITERATIONS})..."
+                    ))
+    
+    if not estimate_valid:
+        logger.warning(f"Estimate validation exhausted max iterations ({MAX_VALIDATION_ITERATIONS}), proceeding anyway")
     
     # Step 3: Final cleanup
     refined_plan = await run_agent_with_status(
@@ -346,6 +543,41 @@ User Context: "{augmented_context}"
         totalDuration=total_duration
     )
     
+    # Step 5: Run online LLM-as-judge evaluation (async, non-blocking for user)
+    if settings.opik_enabled:
+        try:
+            # Run evaluation in background
+            evaluation_results = evaluate_plan_quality(
+                topic=topic,
+                context=context,
+                plan=refined_plan
+            )
+            logger.info(
+                "Plan quality evaluation complete",
+                extra={'extra_data': {
+                    'overall_score': evaluation_results.get('overall_score'),
+                    'structure_score': evaluation_results.get('structure', {}).get('score'),
+                    'task_count': len(scheduled_tasks),
+                    'total_duration': total_duration
+                }}
+            )
+            
+            # Update current trace with evaluation metadata
+            if OPIK_AVAILABLE:
+                try:
+                    opik_context.update_current_trace(
+                        metadata={
+                            "evaluation": evaluation_results,
+                            "task_count": len(scheduled_tasks),
+                            "total_duration_hours": total_duration,
+                            "phases": list(set(t.phase for t in scheduled_tasks))
+                        }
+                    )
+                except Exception as e:
+                    logger.debug(f"Could not update trace metadata: {e}")
+        except Exception as e:
+            logger.warning(f"Plan evaluation skipped: {e}")
+    
     # Clear status
     if status_callback:
         await status_callback(AgentStatusUpdate(
@@ -354,23 +586,34 @@ User Context: "{augmented_context}"
             message=""
         ))
     
+    # Flush all traces to Opik to ensure they're sent
+    if settings.opik_enabled:
+        flush_traces()
+        logger.info(
+            f"✅ All traces flushed to Opik",
+            extra={'extra_data': {'dashboard_url': get_dashboard_url()}}
+        )
+    
     return project
 
 
 def merge_task_updates(existing_tasks: list[Task], updated_plan: dict) -> list[Task]:
     """
-    Merge partial task updates from the Manager with existing tasks.
+    Merge task updates from the Manager with existing tasks.
     
     This ensures that even if the LLM returns partial task data, we preserve
-    all fields from the original tasks.
+    all fields from the original tasks while applying legitimate changes.
     
     Strategy:
     - Create a lookup of existing tasks by ID
     - For each task in updated_plan:
+      - Parse through Pydantic model to normalize values (coerce None to defaults)
       - If ID exists: merge updated fields into existing task
       - If ID is new: add the new task
     - Preserve tasks that weren't modified
     """
+    from .output_schemas import TaskOutput
+    
     # Create lookup by ID
     existing_by_id = {t.id: t for t in existing_tasks}
     updated_tasks_data = updated_plan.get("tasks", [])
@@ -382,6 +625,22 @@ def merge_task_updates(existing_tasks: list[Task], updated_plan: dict) -> list[T
     for ut in updated_tasks_data:
         task_id = ut.get("id", "")
         seen_ids.add(task_id)
+        
+        # Check if LLM actually provided duration/buffer values (not None)
+        raw_duration = ut.get("duration")
+        raw_buffer = ut.get("buffer")
+        llm_provided_duration = raw_duration is not None and raw_duration > 0
+        llm_provided_buffer = raw_buffer is not None
+        
+        # Normalize through Pydantic for safety
+        try:
+            normalized = TaskOutput(**ut)
+            ut_duration = normalized.duration
+            ut_buffer = normalized.buffer
+        except Exception as e:
+            logger.warning(f"Failed to normalize task {task_id}: {e}")
+            ut_duration = raw_duration if raw_duration else 1.0
+            ut_buffer = raw_buffer if raw_buffer is not None else 0.0
         
         if task_id in existing_by_id:
             # Merge: use existing values as defaults, override with new values
@@ -406,14 +665,24 @@ def merge_task_updates(existing_tasks: list[Task], updated_plan: dict) -> list[T
             except ValueError:
                 complexity = existing.complexity
             
+            # Use LLM values if provided, otherwise preserve existing
+            final_duration = ut_duration if llm_provided_duration else existing.duration
+            final_buffer = ut_buffer if llm_provided_buffer else existing.buffer
+            
+            # Log when we're applying a change
+            if final_duration != existing.duration:
+                logger.info(f"Task {task_id}: duration changing from {existing.duration} to {final_duration}")
+            if final_buffer != existing.buffer:
+                logger.info(f"Task {task_id}: buffer changing from {existing.buffer} to {final_buffer}")
+            
             # Merge task - use new value if provided and valid, else keep existing
             merged_task = Task(
                 id=task_id,
                 name=ut.get("name") or existing.name,
                 phase=ut.get("phase") or existing.phase,
                 startOffset=0,  # Will be recalculated by scheduler
-                duration=float(ut.get("duration")) if ut.get("duration") is not None and ut.get("duration") > 0 else existing.duration,
-                buffer=float(ut.get("buffer")) if ut.get("buffer") is not None else existing.buffer,
+                duration=final_duration,
+                buffer=final_buffer,
                 dependencies=ut.get("dependencies") if ut.get("dependencies") is not None else existing.dependencies,
                 description=ut.get("description") if ut.get("description") is not None else existing.description,
                 complexity=complexity,
@@ -464,6 +733,12 @@ def merge_task_updates(existing_tasks: list[Task], updated_plan: dict) -> list[T
     return result_tasks
 
 
+@track(
+    name="chat_with_manager",
+    tags=["manager", "chat", "plan-refinement"],
+    capture_input=True,
+    capture_output=True
+)
 async def chat_with_manager(
     project: ProjectData,
     message: str,
@@ -472,6 +747,7 @@ async def chat_with_manager(
 ) -> dict:
     """
     Handle a chat message with the Project Manager agent.
+    Traced with Opik for conversation monitoring.
     
     Args:
         project: Current project data

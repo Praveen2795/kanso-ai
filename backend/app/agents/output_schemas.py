@@ -4,7 +4,7 @@ These replace the google.genai.types.Schema definitions.
 """
 
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ClarificationOutput(BaseModel):
@@ -30,7 +30,15 @@ class SubtaskOutput(BaseModel):
     """Schema for a subtask within a task."""
     name: str
     description: Optional[str] = None
-    duration: float = Field(description="Duration in hours")
+    duration: float = Field(default=0.5, description="Duration in hours")
+    
+    @field_validator('duration', mode='before')
+    @classmethod
+    def ensure_duration(cls, v):
+        """Ensure duration is never None and has a reasonable default."""
+        if v is None or v == 0:
+            return 0.5
+        return float(v)
 
 
 class TaskOutput(BaseModel):
@@ -42,9 +50,25 @@ class TaskOutput(BaseModel):
     complexity: str = Field(default="Medium", description="Low, Medium, or High")
     subtasks: list[SubtaskOutput] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list, description="IDs of dependent tasks")
-    duration: float = Field(default=0, description="Total estimated hours")
-    buffer: float = Field(default=0, description="Buffer hours")
+    duration: float = Field(default=1.0, description="Total estimated hours")
+    buffer: float = Field(default=0.0, description="Buffer hours")
     startOffset: float = Field(default=0, description="Hours from project start")
+    
+    @field_validator('duration', mode='before')
+    @classmethod
+    def ensure_duration(cls, v):
+        """Ensure duration is never None and is positive."""
+        if v is None or v <= 0:
+            return 1.0  # Default to 1 hour
+        return float(v)
+    
+    @field_validator('buffer', mode='before')
+    @classmethod
+    def ensure_buffer(cls, v):
+        """Ensure buffer is never None."""
+        if v is None:
+            return 0.0
+        return max(float(v), 0.0)
 
 
 class ProjectPlanOutput(BaseModel):

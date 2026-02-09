@@ -26,6 +26,9 @@ const App: React.FC = () => {
   
   // File Upload State
   const [uploadedFile, setUploadedFile] = useState<UploadedFile | null>(null);
+  
+  // Reference URLs for research
+  const [referenceUrls, setReferenceUrls] = useState('');
 
   const [agentStatus, setAgentStatus] = useState<AgentStatus>({ active: false, name: AgentType.ANALYST, message: '' });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -34,8 +37,19 @@ const App: React.FC = () => {
   const [isRefining, setIsRefining] = useState(false);
   const [showDetailsPulse, setShowDetailsPulse] = useState(false);
   
+  // Error state for displaying user-friendly error messages
+  const [error, setError] = useState<{ message: string; details?: string } | null>(null);
+  
   const chatEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Auto-dismiss error after 10 seconds
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => setError(null), 10000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
 
   // Initialize chat visibility based on screen width
   useEffect(() => {
@@ -83,6 +97,9 @@ const App: React.FC = () => {
     
     // If triggered via suggestion, update state to reflect selection
     if (overrideInput) setInputValue(overrideInput);
+    
+    // Clear any previous errors
+    setError(null);
 
     setAppState('CLARIFYING');
     setUploadedFile(null); // Reset file on new start
@@ -98,16 +115,28 @@ const App: React.FC = () => {
       }
 
       await generatePlan(finalInput, "Context implied from prompt.");
-    } catch (e) {
-      alert("Something went wrong with the AI. Please try again.");
+    } catch (e: any) {
+      const errorMsg = e?.message || 'Something went wrong with the AI.';
+      setError({ 
+        message: 'Analysis Failed', 
+        details: errorMsg.includes('INVALID_ARGUMENT') 
+          ? 'The AI service returned an error. Please try again.' 
+          : errorMsg 
+      });
       setAppState('IDLE');
     }
   };
 
   const handleClarificationSubmit = async () => {
-    const context = Object.entries(clarificationAnswers)
+    let context = Object.entries(clarificationAnswers)
       .map(([q, a]) => `Q: ${q}\nA: ${a}`)
       .join('\n');
+    
+    // Append reference URLs to context if provided
+    if (referenceUrls.trim()) {
+      context += `\n\nReference URLs for research:\n${referenceUrls.trim()}`;
+    }
+    
     await generatePlan(inputValue, context);
   };
 
@@ -148,10 +177,16 @@ const App: React.FC = () => {
         setIsChatOpen(true);
       }
 
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
+      const errorMsg = e?.message || 'Failed to generate plan.';
+      setError({ 
+        message: 'Plan Generation Failed', 
+        details: errorMsg.includes('fetch') 
+          ? 'Could not fetch URL content. The URL may be inaccessible or blocked.'
+          : errorMsg
+      });
       setAppState('IDLE');
-      alert("Failed to generate plan. Please try a simpler prompt.");
     }
   };
 
@@ -237,6 +272,35 @@ const App: React.FC = () => {
 
   return (
     <div className="h-screen bg-background text-slate-100 flex flex-col font-sans overflow-hidden">
+      
+      {/* Error Toast Notification */}
+      {error && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-[100] animate-in slide-in-from-top-4 duration-300">
+          <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 backdrop-blur-lg shadow-xl max-w-md">
+            <div className="flex items-start gap-3">
+              <div className="shrink-0 w-8 h-8 rounded-full bg-red-500/20 flex items-center justify-center">
+                <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h3 className="font-semibold text-red-400">{error.message}</h3>
+                {error.details && (
+                  <p className="text-sm text-red-300/80 mt-1">{error.details}</p>
+                )}
+              </div>
+              <button 
+                onClick={() => setError(null)}
+                className="shrink-0 text-red-400 hover:text-red-300 transition-colors"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       
       {/* Navbar */}
       <nav className="h-14 border-b border-slate-800 flex items-center px-6 justify-between bg-surface/50 backdrop-blur-md z-50 shrink-0">
@@ -391,12 +455,12 @@ const App: React.FC = () => {
         </div>
       ) : (
         /* IDLE / LOADING LAYOUT */
-        <main className="flex-1 overflow-y-auto relative flex flex-col items-center justify-center p-4 min-h-[500px]">
+        <main className="flex-1 overflow-y-auto relative flex flex-col items-center p-4 py-8">
           {/* Background Animation for IDLE state */}
           {appState === 'IDLE' && <ImpactBackground />}
           
           {appState === 'IDLE' && (
-            <div className="w-full max-w-2xl text-center space-y-8 animate-in fade-in slide-in-from-bottom-8 duration-700 z-10">
+            <div className="w-full max-w-2xl text-center space-y-8 animate-in fade-in slide-in-from-bottom-8 duration-700 z-10 my-auto">
                <div className="space-y-4">
                  <h1 className="text-5xl md:text-6xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-purple-400 to-emerald-400 pb-2 drop-shadow-sm">
                    Simplicity in Planning.
@@ -444,7 +508,7 @@ const App: React.FC = () => {
           )}
           {appState === 'CLARIFYING' && agentStatus.active && <AgentStatusDisplay status={agentStatus} />}
           {appState === 'CLARIFYING' && !agentStatus.active && clarifyingQuestions.length > 0 && (
-            <div className="w-full max-w-xl bg-surface p-8 rounded-2xl border border-slate-700 shadow-2xl animate-in zoom-in duration-300">
+            <div className="w-full max-w-xl bg-surface p-8 rounded-2xl border border-slate-700 shadow-2xl animate-in zoom-in duration-300 my-4">
               <h2 className="text-2xl font-bold mb-4 text-primary">Just a few details...</h2>
               <div className="space-y-5">
                 {clarifyingQuestions.map((q, idx) => (
@@ -452,12 +516,31 @@ const App: React.FC = () => {
                     <label className="text-sm font-medium text-slate-300 block">{q}</label>
                     <input 
                       type="text" 
-                      className="w-full bg-background border border-slate-700 rounded-lg p-3 focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all"
+                      className="w-full bg-background border border-slate-700 rounded-lg p-3 focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all text-slate-100 placeholder-slate-500"
                       placeholder="Your answer"
+                      value={clarificationAnswers[q] || ''}
                       onChange={(e) => setClarificationAnswers(prev => ({...prev, [q]: e.target.value}))}
+                      autoComplete="off"
+                      spellCheck="true"
                     />
                   </div>
                 ))}
+
+                {/* REFERENCE URLS SECTION */}
+                <div className="pt-4 border-t border-slate-700/50 mt-4">
+                  <label className="text-sm font-medium text-slate-300 block mb-2 flex items-center justify-between">
+                     <span>Reference Links for Research</span>
+                     <span className="text-xs text-slate-500 font-normal">(Optional)</span>
+                  </label>
+                  <textarea 
+                    className="w-full bg-background border border-slate-700 rounded-lg p-3 focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all text-slate-100 placeholder-slate-500 text-sm min-h-[80px] resize-none"
+                    placeholder="Paste any helpful URLs (one per line)&#10;e.g., https://aws.amazon.com/certification/&#10;     https://docs.example.com/guide"
+                    value={referenceUrls}
+                    onChange={(e) => setReferenceUrls(e.target.value)}
+                    spellCheck="false"
+                  />
+                  <p className="text-xs text-slate-500 mt-1">These links will be researched to provide better context for your plan.</p>
+                </div>
 
                 {/* FILE UPLOAD SECTION */}
                 <div className="pt-4 border-t border-slate-700/50 mt-4">

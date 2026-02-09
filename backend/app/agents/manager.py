@@ -55,17 +55,40 @@ Current Project:
 4. **CRITICAL - Plan Updates**: 
    - **ALWAYS return the COMPLETE list of ALL tasks** - not just the modified ones!
    - Include ALL existing tasks from the current project, with modifications applied.
-   - Every task MUST have: id, name, phase, duration (number > 0), buffer (number >= 0), dependencies, subtasks.
-   - Set 'startOffset' to 0 for all tasks (scheduler will recalculate).
-   - Never return partial task lists - the frontend needs ALL tasks to render the Gantt chart.
+   
+   **MANDATORY NUMERIC FIELDS FOR EVERY TASK:**
+   - "duration": MUST be a positive number (e.g., 4.0, 8.5, 16.0) - NEVER null, NEVER omit
+   - "buffer": MUST be a number >= 0 (e.g., 0, 1.0, 2.0) - NEVER null, NEVER omit
+   - "startOffset": ALWAYS set to 0 (scheduler will recalculate)
+   
+   **If user asks to add/increase time**: ADD to the existing duration
+   - Example: "Add 1 hour to first task" with duration 4.0 → new duration: 5.0
+   - Example: "Double the time" with duration 4.0 → new duration: 8.0
+   
+   **If user asks to reduce time**: SUBTRACT from duration (min 0.5)
+   - Example: "Remove 2 hours from testing" with duration 8.0 → new duration: 6.0
 
 5. **Responses**:
    - Always provide a helpful 'reply' explaining what you did.
    - If no plan change is needed, omit 'updatedPlan' entirely (return only 'reply').
 
-Return JSON with 'reply' and optional 'updatedPlan' (containing the FULL task list).
+**Example task in updatedPlan:**
+```json
+{{
+  "id": "task_1",
+  "name": "Project Setup",
+  "phase": "Phase 1",
+  "duration": 5.0,
+  "buffer": 1.0,
+  "startOffset": 0,
+  "dependencies": [],
+  "subtasks": []
+}}
+```
+
+Return JSON with 'reply' and optional 'updatedPlan' (containing the FULL task list with ALL numeric fields populated).
 """,
-        output_schema=ChatOutput
+        output_schema=ChatOutput,
     )
 
 

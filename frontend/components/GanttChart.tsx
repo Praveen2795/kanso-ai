@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useRef, useEffect } from 'react';
+import React, { useMemo, useState, useRef, useEffect, useCallback } from 'react';
 import { Task, ProjectData } from '../types';
 import { exportToCalendar } from '../services/apiService';
 
@@ -12,6 +12,12 @@ const GanttChart: React.FC<Props> = ({ data }) => {
   const [hoveredTask, setHoveredTask] = useState<{ id: string, name: string, phase: string, description?: string, duration: number, buffer?: number, type: 'TASK'|'SUBTASK' } | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const containerRef = useRef<HTMLDivElement>(null);
+  
+  // Resizable pane state
+  const [paneWidth, setPaneWidth] = useState(320);
+  const [isResizing, setIsResizing] = useState(false);
+  const minPaneWidth = 200;
+  const maxPaneWidth = 600;
   
   // Export modal state
   const [showExportModal, setShowExportModal] = useState(false);
@@ -35,10 +41,28 @@ const GanttChart: React.FC<Props> = ({ data }) => {
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       setMousePos({ x: e.clientX, y: e.clientY });
+      
+      // Handle pane resizing
+      if (isResizing) {
+        const containerRect = containerRef.current?.getBoundingClientRect();
+        if (containerRect) {
+          const newWidth = e.clientX - containerRect.left;
+          setPaneWidth(Math.max(minPaneWidth, Math.min(maxPaneWidth, newWidth)));
+        }
+      }
     };
+    
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+    
     window.addEventListener('mousemove', handleMouseMove);
-    return () => window.removeEventListener('mousemove', handleMouseMove);
-  }, []);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing]);
 
   const maxHours = useMemo(() => {
     if (!data.tasks.length) return 24;
@@ -77,7 +101,10 @@ const GanttChart: React.FC<Props> = ({ data }) => {
   };
 
   return (
-    <div className="flex flex-col h-full bg-surface/30 rounded-xl overflow-hidden shadow-2xl border border-slate-700 relative" ref={containerRef}>
+    <div 
+      className={`flex flex-col h-full bg-surface/30 rounded-xl overflow-hidden shadow-2xl border border-slate-700 relative ${isResizing ? 'cursor-col-resize select-none' : ''}`} 
+      ref={containerRef}
+    >
       
       {/* Export Modal */}
       {showExportModal && (
@@ -224,8 +251,20 @@ const GanttChart: React.FC<Props> = ({ data }) => {
             
             {/* Timeline Header */}
             <div className="flex sticky top-0 z-30 h-10 bg-slate-800 border-b border-slate-700 shadow-md">
-              <div className="sticky left-0 w-64 md:w-80 bg-slate-800 border-r border-slate-700 shrink-0 flex items-center px-4 font-semibold text-xs text-slate-400 uppercase tracking-wider z-40">
+              <div 
+                className="sticky left-0 bg-slate-800 border-r border-slate-700 shrink-0 flex items-center px-4 font-semibold text-xs text-slate-400 uppercase tracking-wider z-40 relative"
+                style={{ width: `${paneWidth}px` }}
+              >
                 Task Name
+                {/* Resize Handle */}
+                <div 
+                  className={`absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/50 transition-colors ${isResizing ? 'bg-primary' : 'bg-transparent'}`}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    setIsResizing(true);
+                  }}
+                  title="Drag to resize"
+                />
               </div>
               <div className="relative h-full flex-1" style={{ width: `${maxHours * scale}px` }}>
                  {Array.from({ length: Math.ceil(maxHours / 5) + 1 }).map((_, i) => (
@@ -249,7 +288,7 @@ const GanttChart: React.FC<Props> = ({ data }) => {
                     <div 
                       key={i} 
                       className="absolute top-0 bottom-0 border-l border-slate-800"
-                      style={{ left: `${320 + (i * 5 * scale)}px` }}
+                      style={{ left: `${paneWidth + (i * 5 * scale)}px` }}
                     />
                   ))}
                </div>
@@ -264,15 +303,19 @@ const GanttChart: React.FC<Props> = ({ data }) => {
                    <div className="flex group hover:bg-slate-800/50 transition-colors h-12 border-b border-slate-800/50 relative z-10">
                       
                       {/* Left Col */}
-                      <div className="sticky left-0 w-64 md:w-80 bg-surface/95 backdrop-blur border-r border-slate-700 shrink-0 flex items-center px-4 z-20 group-hover:bg-slate-800 transition-colors cursor-pointer" onClick={() => toggleExpand(task.id)}>
+                      <div 
+                        className="sticky left-0 bg-surface/95 backdrop-blur border-r border-slate-700 shrink-0 flex items-center px-4 z-20 group-hover:bg-slate-800 transition-colors cursor-pointer" 
+                        style={{ width: `${paneWidth}px` }}
+                        onClick={() => toggleExpand(task.id)}
+                      >
                          <div className="mr-2 text-slate-400 hover:text-white transition-colors">
                            {isExpanded ? '▼' : '▶'}
                          </div>
-                         <div className="min-w-0 flex-1">
-                            <div className="text-sm font-medium text-slate-200 truncate">{task.name}</div>
+                         <div className="min-w-0 flex-1 overflow-hidden">
+                            <div className="text-sm font-medium text-slate-200 truncate" title={task.name}>{task.name}</div>
                             <div className="flex items-center gap-2">
-                               <div className="text-[10px] uppercase tracking-wider truncate" style={{color: getPhaseColor(task.phase)}}>{task.phase}</div>
-                               <div className="text-[9px] text-slate-500">{task.subtasks?.length || 0} items</div>
+                               <div className="text-[10px] uppercase tracking-wider truncate" style={{color: getPhaseColor(task.phase)}} title={task.phase}>{task.phase}</div>
+                               <div className="text-[9px] text-slate-500 shrink-0">{task.subtasks?.length || 0} items</div>
                             </div>
                          </div>
                       </div>
@@ -324,10 +367,13 @@ const GanttChart: React.FC<Props> = ({ data }) => {
                       return (
                         <div key={`${task.id}-sub-${idx}`} className="flex group hover:bg-slate-800/30 transition-colors h-8 border-b border-slate-800/30 relative z-10 bg-slate-900/20">
                            {/* Left Col - Indented */}
-                           <div className="sticky left-0 w-64 md:w-80 bg-surface/90 backdrop-blur border-r border-slate-700 shrink-0 flex items-center px-4 pl-10 z-20 group-hover:bg-slate-800/50 transition-colors">
-                              <div className="min-w-0 flex-1">
-                                 <div className="text-xs text-slate-400 truncate flex items-center gap-2">
-                                   <span className="w-1.5 h-1.5 rounded-full bg-slate-600"></span>
+                           <div 
+                             className="sticky left-0 bg-surface/90 backdrop-blur border-r border-slate-700 shrink-0 flex items-center px-4 pl-10 z-20 group-hover:bg-slate-800/50 transition-colors"
+                             style={{ width: `${paneWidth}px` }}
+                           >
+                              <div className="min-w-0 flex-1 overflow-hidden">
+                                 <div className="text-xs text-slate-400 truncate flex items-center gap-2" title={sub.name}>
+                                   <span className="w-1.5 h-1.5 rounded-full bg-slate-600 shrink-0"></span>
                                    {sub.name}
                                  </div>
                               </div>

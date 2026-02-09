@@ -16,6 +16,7 @@ class ComplexityLevel(str, Enum):
 
 class AgentType(str, Enum):
     ANALYST = "Analyst"
+    RESEARCHER = "Researcher"
     ARCHITECT = "Architect"
     ESTIMATOR = "Estimator"
     REVIEWER = "Reviewer"

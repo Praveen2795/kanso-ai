@@ -1,5 +1,6 @@
 """
 FastAPI application with REST API endpoints and WebSocket support.
+Integrated with Opik for comprehensive AI observability.
 """
 
 import json
@@ -29,6 +30,14 @@ from .agents.orchestrator import (
     chat_with_manager
 )
 from .calendar_export import generate_ics
+from .opik_service import (
+    configure_opik,
+    log_feedback,
+    get_trace_url,
+    get_dashboard_url,
+    flush_traces,
+    is_opik_enabled
+)
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -39,16 +48,39 @@ async def lifespan(app: FastAPI):
     """Application lifecycle management."""
     # Startup
     setup_logging()
+    
+    # Initialize Opik observability
+    if settings.opik_enabled:
+        opik_configured = configure_opik()
+        if opik_configured:
+            dashboard_url = get_dashboard_url()
+            logger.info(
+                f"✅ Opik observability enabled",
+                extra={'extra_data': {
+                    'opik_workspace': settings.opik_workspace,
+                    'opik_project': settings.opik_project_name,
+                    'dashboard_url': dashboard_url
+                }}
+            )
+            print(f"\n📊 View traces at: {dashboard_url}\n")
+        else:
+            logger.warning("Opik observability failed to configure")
+    
     logger.info(
         "Kanso.AI Backend starting",
         extra={'extra_data': {
             'host': settings.host,
             'port': settings.port,
-            'cors_origins': settings.cors_origins_list
+            'cors_origins': settings.cors_origins_list,
+            'opik_enabled': settings.opik_enabled
         }}
     )
     yield
     # Shutdown
+    # Flush any remaining traces to Opik before shutdown
+    if settings.opik_enabled:
+        flush_traces()
+        logger.info("Opik traces flushed on shutdown")
     logger.info("Kanso.AI Backend shutting down")
 
 
@@ -117,6 +149,92 @@ manager = ConnectionManager()
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "service": "kanso-ai-backend"}
+
+
+@app.get("/api/observability/status")
+async def observability_status():
+    """
+    Check Opik observability status.
+    Returns configuration state and dashboard URL.
+    """
+    if not settings.opik_enabled:
+        return {
+            "enabled": False,
+            "message": "Opik not configured. Set OPIK_API_KEY and OPIK_WORKSPACE in .env",
+            "dashboard_url": None,
+            "setup_instructions": {
+                "1": "Sign up at https://www.comet.com/signup",
+                "2": "Get your API key from the dashboard",
+                "3": "Add OPIK_API_KEY and OPIK_WORKSPACE to backend/.env"
+            }
+        }
+    
+    dashboard_url = get_dashboard_url()
+    return {
+        "enabled": True,
+        "workspace": settings.opik_workspace,
+        "project": settings.opik_project_name,
+        "dashboard_url": dashboard_url,
+        "traces_url": f"{dashboard_url}/traces",
+        "features": {
+            "agent_tracing": "Full multi-agent pipeline tracing",
+            "llm_as_judge": "Automatic plan quality evaluation",
+            "token_tracking": "Token usage and cost monitoring",
+            "user_feedback": "Feedback collection via /api/feedback",
+            "callbacks": "Before/after agent callbacks for detailed tracing"
+        },
+        "metrics": [
+            "plan_structure_score",
+            "estimate_reasonableness_score",
+            "plan_completeness_score",
+            "overall_quality"
+        ]
+    }
+
+
+class FeedbackRequest(BaseModel):
+    """Request model for user feedback on generated plans."""
+    trace_id: str
+    score: float  # 0.0 to 1.0
+    category: str = "user_satisfaction"
+    comment: str = ""
+
+
+@app.post("/api/feedback")
+async def submit_feedback(request: FeedbackRequest):
+    """
+    Submit user feedback on a generated plan.
+    
+    This logs feedback to Opik for tracking user satisfaction
+    and improving the system over time.
+    """
+    if not settings.opik_enabled:
+        return {"status": "skipped", "message": "Opik not configured"}
+    
+    if not 0.0 <= request.score <= 1.0:
+        raise HTTPException(status_code=400, detail="Score must be between 0.0 and 1.0")
+    
+    log_feedback(
+        trace_id=request.trace_id,
+        score=request.score,
+        category=request.category,
+        comment=request.comment
+    )
+    
+    logger.info(
+        "User feedback logged",
+        extra={'extra_data': {
+            'trace_id': request.trace_id,
+            'score': request.score,
+            'category': request.category
+        }}
+    )
+    
+    return {
+        "status": "logged",
+        "trace_id": request.trace_id,
+        "trace_url": get_trace_url(request.trace_id)
+    }
 
 
 @app.post("/api/analyze", response_model=AnalysisResponse)

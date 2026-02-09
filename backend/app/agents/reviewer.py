@@ -1,6 +1,7 @@
 """
 Reviewer Agent - Validates structure and estimates from other agents.
 Acts as quality control in the multi-agent pipeline.
+Uses iteration loops with max_iterations for controlled validation.
 """
 
 from google.adk.agents import LlmAgent
@@ -9,6 +10,9 @@ from ..config import get_settings
 from .output_schemas import ValidationOutput
 
 settings = get_settings()
+
+# Maximum iterations for validation loops (prevents endless retries)
+MAX_VALIDATION_ITERATIONS = 2
 
 
 def create_structure_reviewer_agent() -> LlmAgent:

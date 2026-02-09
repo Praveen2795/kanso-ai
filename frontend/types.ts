@@ -1,10 +1,10 @@
 export enum AgentType {
   ANALYST = 'Analyst',
+  RESEARCHER = 'Researcher',
   ARCHITECT = 'Architect',
   ESTIMATOR = 'Estimator',
   REVIEWER = 'Reviewer',
-  MANAGER = 'Manager', // For chat
-  WEB_SEARCH = 'Web Search'
+  MANAGER = 'Manager',
 }
 
 export type ComplexityLevel = 'Low' | 'Medium' | 'High';
