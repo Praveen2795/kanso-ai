@@ -16,6 +16,18 @@
 
 > 🎥 **[Watch the Demo Video →](https://www.youtube.com/watch?v=XmqIp9_VsEA)**
 
+<div align="center">
+
+### 🚀 Plan Generation — 7 AI Agents in Action
+<img src="assets/demo-plan-generation.gif" alt="Kanso.AI Plan Generation Demo" width="800"/>
+
+<br/>
+
+### 💬 Chat Refinement — Conversational Plan Updates
+<img src="assets/demo-chat-refinement.gif" alt="Kanso.AI Chat Refinement Demo" width="800"/>
+
+</div>
+
 ---
 
 ## Table of Contents
