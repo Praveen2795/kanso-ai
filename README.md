@@ -10,7 +10,11 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
 
+[![Demo Video](https://img.shields.io/badge/Demo-YouTube-FF0000.svg?logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=XmqIp9_VsEA)
+
 </div>
+
+> 🎥 **[Watch the Demo Video →](https://www.youtube.com/watch?v=XmqIp9_VsEA)**
 
 ---
 
